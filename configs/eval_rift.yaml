@@ -1,0 +1,9 @@
+exp_name: rift_eval
+device: cuda
+out_dir: outputs/rift_eval
+cift_ckpt: /scratch/sahil/.../cift_best.pth
+cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+policy_ckpt: outputs/rift_rl/latest.pth
+datasets: [celebdf, wilddeepfake, dfdc, dfd, diffswap]
+explainers: [random, gradcam, cift_gap, rift_policy]
+intervention: {mode: blur, topk_frac: 0.12}

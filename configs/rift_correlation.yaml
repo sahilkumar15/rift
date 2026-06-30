@@ -1,0 +1,8 @@
+# The 4.5/5 experiment: does faithfulness predict zero-shot AUC?
+exp_name: rift_correlation
+out_dir: outputs/rift_correlation
+min_n: 5                 # <5 checkpoints -> flagged non-reportable
+# rows are produced by eval_rift per checkpoint, OR supply --rows_json with:
+# [{"faithfulness":..,"in_domain_auc":..,"plausibility":..,"zero_shot_auc":..}, ...]
+checkpoints: []          # list of policy/detector ckpts
+datasets: {in_domain: ffpp_val, zero_shot: [celebdf, wilddeepfake, dfdc, dfd, diffswap]}

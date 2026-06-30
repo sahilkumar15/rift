@@ -1,0 +1,14 @@
+# 3 blocks. Block1 toggles reward+intervention; Block2 explainer baselines; Block3 correlation.
+exp_name: rift_ablations
+base_config: configs/train_rift_rl.yaml
+block1_method:        # (reward_preset, use_intervention, ground_in_delta) resolved in ablation_runner
+  - acc_only
+  - plausibility_only
+  - generic_logit_interv
+  - delta_reward_no_int
+  - delta_int_no_rl
+  - full_rift_rl
+block2_audit_explainers: [random, gradcam, artifact_external, cift_gap, vlm_external, rift_policy]
+block3_predictive:
+  predictors: [faithfulness, in_domain_auc, plausibility]
+  target: zero_shot_auc

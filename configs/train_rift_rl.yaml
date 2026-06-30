@@ -1,0 +1,26 @@
+exp_name: rift_rl_full
+device: cuda
+seed: 42
+out_dir: outputs/rift_rl
+cift_ckpt: /scratch/sahil/.../cift_best.pth
+cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+strict_identity_gap: false
+algo: reinforce        # reinforce | ppo
+lr: 0.0003
+epochs: 50
+grid: 8
+horizon: 4             # >1 : the env is multi-step. H=1 ablation tests bandit-collapse.
+reward_preset: full_rift   # acc_only|plausibility|generic_logit|delta_no_interv|full_rift
+lagrangian: false
+constraint_budget: 0.0
+monitor: val/rift_score
+top_k: 3
+interval: 10
+resume: auto           # auto | none | /path/to.pth
+data:
+  image_size: 256
+  batch_size: 8
+  train_csv: /path/to/ffpp_train.csv
+  val_csv: /path/to/ffpp_val.csv
+wandb: false
+wandb_project: rift

@@ -1,0 +1,11 @@
+torch>=2.0
+torchvision
+numpy
+scipy
+pyyaml
+pillow
+tqdm
+# optional:
+# wandb
+# timm                # if your CIFT backbone needs it
+# mamba-ssm           # if your CIFT uses Mamba

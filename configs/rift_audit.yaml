@@ -1,0 +1,24 @@
+# RIFT audit: necessity/sufficiency faithfulness leaderboard
+exp_name: rift_audit
+device: cuda
+out_dir: outputs/rift_audit
+cift_ckpt: /scratch/sahil/.../cift_best.pth   # <-- set
+cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+strict_identity_gap: false      # true -> raise if donor metadata missing
+data:
+  image_size: 256
+  batch_size: 8
+  val_csv: /path/to/ffpp_val.csv   # image_path,label,source_id,target_id,...
+explainers: [random, gradcam, cift_gap, rift_policy]
+intervention:
+  mode: blur          # zero | mean | blur
+  topk_frac: 0.12
+reward_weights:       # used only for the combined rift_score column
+  w_delta: 1.0
+  w_logit: 0.5
+  w_sparsity: 0.3
+  w_identity: 0.3
+  w_perceptual: 0.2
+  w_plausibility: 0.0
+wandb: false
+wandb_project: rift
