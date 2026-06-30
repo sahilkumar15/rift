@@ -1,0 +1,4 @@
+image_path,label,source_id,target_id,manipulation_type,mask_path,donor_path,metadata_json
+/data/ffpp/forged/000_003/0001.png,1,000,003,FaceSwap,/data/ffpp/cited_masks/000_003/0001.png,/data/ffpp/donor_ref/000/0001.png,{}
+/data/ffpp/forged/000_003/0002.png,1,000,003,FaceSwap,/data/ffpp/cited_masks/000_003/0002.png,/data/ffpp/donor_ref/000/0002.png,{}
+/data/ffpp/forged/001_870/0001.png,1,001,870,Deepfakes,/data/ffpp/cited_masks/001_870/0001.png,/data/ffpp/donor_ref/001/0001.png,{}

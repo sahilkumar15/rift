@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rift"
+version = "0.1.0"
+description = "RIFT — Reinforced Identity-Gap Faithfulness Testing (auditing deepfake explanation faithfulness via identity-gap interventions)"
+requires-python = ">=3.9"
+dependencies = ["numpy", "pyyaml"]
+
+[project.optional-dependencies]
+# torch/model deps are NOT installed by default: the pure-logic core + gate
+# decision logic run without them. Install these on Katz for the real model runs.
+runtime = ["torch", "torchvision", "pillow", "scipy", "tqdm", "wandb"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["iganer*"]
+
+[project.scripts]
+rift-gate1 = "iganer.rift.gates.gate1_validity:main"
+rift-gate2 = "iganer.rift.gates.gate2_separation:main"
+rift-gate3 = "iganer.rift.gates.gate3_correlation:main"
