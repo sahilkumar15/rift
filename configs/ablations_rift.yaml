@@ -1,14 +1,92 @@
-# 3 blocks. Block1 toggles reward+intervention; Block2 explainer baselines; Block3 correlation.
-exp_name: rift_ablations
-base_config: configs/train_rift_rl.yaml
-block1_method:        # (reward_preset, use_intervention, ground_in_delta) resolved in ablation_runner
-  - acc_only
-  - plausibility_only
-  - generic_logit_interv
-  - delta_reward_no_int
-  - delta_int_no_rl
-  - full_rift_rl
-block2_audit_explainers: [random, gradcam, artifact_external, cift_gap, vlm_external, rift_policy]
-block3_predictive:
+# ════════════════════════════════════════════════════════════════════════════════════
+# RIFT ABLATION SPEC — the ✓/✗ permutation matrix (consumed by ablate_rift.py)
+# ════════════════════════════════════════════════════════════════════════════════════
+# Booleans below are the literal tick/cross of each factor. The runner expands these
+# into runnable cells, executes each (×seeds), and writes one CSV/JSON per cell plus a
+# combined table. `--dry-run` prints this matrix WITHOUT touching the model.
+#
+# FACTOR LEGEND
+#   I = intervene        : run necessity+sufficiency (vs plausibility-only)
+#   G = ground_in_delta  : evidence channel = donor-grounded Δ (vs generic detector logit)
+#                          --> UNDEFINED ("null") when I=false; runner marks it "—" and
+#                              refuses to report Δ-faithfulness for that cell.
+#   P = plausibility     : include annotation-IoU plausibility
+#   K = constraints      : sparsity/identity/perceptual penalties in the score
+# ════════════════════════════════════════════════════════════════════════════════════
+
+# ── BLOCK 0 — Intervention validity (Gate 1). Not a factorial; a separation sweep. ──
+block0_validity:
+  min_sep: 0.15
+  cells:
+    - {id: blur_topk10,  mask_op: blur, topk_frac: 0.10}
+    - {id: blur_topk12,  mask_op: blur, topk_frac: 0.12}
+    - {id: mean_topk12,  mask_op: mean, topk_frac: 0.12}
+    - {id: zero_topk12,  mask_op: zero, topk_frac: 0.12}
+  # PASS if mean(cited_drop) - mean(random_drop) >= min_sep on the default cell.
+
+# ── BLOCK 1 — Method factorial (the MAIN ablation table). 6 canonical cells. ────────
+# row id              | I | G | P | K | ~ prior work | isolates
+# acc_only            | x | - | x | x | floor        | lower bound
+# plausibility_only   | x | - | v | x | MARE         | plausibility w/o causation
+# generic_logit       | v | x | x | v | DeFacto      | intervention w/o delta-grounding
+# delta_reward_no_int | x | - | x | v | degenerate   | delta-reward but no test (G = "-")
+# delta_grounded      | v | v | x | v | RIFT core    | + delta-grounding (vs generic_logit)
+# full_rift           | v | v | v | v | RIFT         | + plausibility reporting
+block1_method:
+  cells:
+    - {id: acc_only,            intervene: false, ground_in_delta: null,  plausibility: false, constraints: false, reward_preset: acc_only}
+    - {id: plausibility_only,   intervene: false, ground_in_delta: null,  plausibility: true,  constraints: false, reward_preset: plausibility}
+    - {id: generic_logit,       intervene: true,  ground_in_delta: false, plausibility: false, constraints: true,  reward_preset: generic_logit}
+    - {id: delta_reward_no_int, intervene: false, ground_in_delta: null,  plausibility: false, constraints: true,  reward_preset: delta_no_interv}
+    - {id: delta_grounded,      intervene: true,  ground_in_delta: true,  plausibility: false, constraints: true,  reward_preset: full_rift}
+    - {id: full_rift,           intervene: true,  ground_in_delta: true,  plausibility: true,  constraints: true,  reward_preset: full_rift}
+  # KEY CONTRASTS the runner computes automatically:
+  #   delta_grounding_gain = faithfulness(delta_grounded) - faithfulness(generic_logit)
+  #   plausibility_gap     = plausibility(plausibility_only) high & faithfulness low
+  #   no_int_sanity        = delta_reward_no_int must NOT earn delta-faithfulness (G="-")
+
+# ── BLOCK 2 — Audit leaderboard (explainers). Scored on faithfulness vs plausibility ──
+# explainer       | spatial | uses delta | external | expect plausible | expect faithful
+# random          |   v     |   x        |    x     |        x         |       x
+# gradcam_logit   |   v     |   x        |    x     |        ~         |    ~ (logit)
+# cift_gap        |   v     |   v        |    x     |        ~         |    v (if Gate1)
+# annotation      |   v     |   x        |  human   |        v         |       x   <- expose
+# vlm_external    |   v     |   x        |  VLM     |        v         |       ?
+# rift_policy     |   v     |   v        |    x     |        ~         |    v (repair)
+block2_audit:
+  explainers: [random, gradcam_logit, cift_gap, annotation, vlm_external, rift_policy]
+  sort_key: faithfulness_delta
+  expose_rule: {min_plausibility: 0.60, max_faithfulness: 0.35}   # "plausible but unfaithful"
+
+# ── BLOCK 3 — Predictive correlation (the headline). ───────────────────────────────
+# predictor      | expected | role
+# faithfulness   |  +strong | headline
+# in_domain_auc  |  ~0      | the dissociation
+# plausibility   |  weak    | control
+block3_correlation:
   predictors: [faithfulness, in_domain_auc, plausibility]
   target: zero_shot_auc
+  headline_min_n: 15
+  saturation_control:                # the reviewer trap: re-run on a matched-accuracy band
+    enable: true
+    in_domain_auc_band: 0.005        # keep only checkpoints within +/- band of the median AUC
+
+# ── BLOCK 4 — RL sensitivity (is it a bandit?). H sweep + game/protection toggles. ──
+# cell      | H | game | protect | tests
+# static    | 1 |  x   |   x     | no policy (floor)
+# bandit    | 1 |  v   |   v     | single-step policy
+# seq_h2    | 2 |  v   |   v     | does multi-step help?
+# seq_h4    | 4 |  v   |   v     | RIFT default
+# seq_h8    | 8 |  v   |   v     | diminishing returns?
+# no_protect| 4 |  v   |   x     | reward-hacking check
+block4_rl:
+  cells:
+    - {id: static,     horizon: 1, game: false, protection: false}
+    - {id: bandit,     horizon: 1, game: true,  protection: true}
+    - {id: seq_h2,     horizon: 2, game: true,  protection: true}
+    - {id: seq_h4,     horizon: 4, game: true,  protection: true}
+    - {id: seq_h8,     horizon: 8, game: true,  protection: true}
+    - {id: no_protect, horizon: 4, game: true,  protection: false}
+  demote_rule:                       # if H>1 ties H=1 within this margin, demote RL honestly
+    tie_margin: 0.02
+    compare: [seq_h4, bandit]
