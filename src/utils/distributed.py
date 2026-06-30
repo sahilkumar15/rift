@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/distributed.py
+# Path: src/utils/distributed.py
 # Status: NEW
 """Tiny DDP helpers; single-process safe defaults."""
 import os

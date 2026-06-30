@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/seed.py
+# Path: src/utils/seed.py
 # Status: NEW
 """Global seeding for reproducibility; captures RNG states for checkpoints."""
 from __future__ import annotations

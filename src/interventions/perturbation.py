@@ -1,4 +1,4 @@
-# Path: iganer/rift/interventions/perturbation.py
+# Path: src/interventions/perturbation.py
 # Status: NEW
 """Optional frequency-domain / patch-dropout perturbations. torch-guarded."""
 from __future__ import annotations

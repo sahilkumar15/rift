@@ -1,4 +1,4 @@
-# Path: iganer/rift/audit/ablation_runner.py
+# Path: src/audit/ablation_runner.py
 # Status: MODIFIED (config-driven 5-block planner + torch-guarded executors)
 """
 ablation_runner.py — expands the RIFT ablation spec (configs/ablations_rift.yaml) into

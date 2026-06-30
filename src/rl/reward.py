@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/reward.py
+# Path: src/rl/reward.py
 # Status: NEW
 """Reward weight presets used by ablation toggles. The reward MATH lives in
 faithfulness.faithfulness_score.compute_rift_score; this just supplies weights."""

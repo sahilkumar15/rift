@@ -1,4 +1,4 @@
-# Path: iganer/rift/explainers/gradcam_explainer.py
+# Path: src/explainers/gradcam_explainer.py
 # Status: NEW
 """Grad-CAM saliency from detector features w.r.t. the fake logit."""
 from .base_explainer import BaseExplainer

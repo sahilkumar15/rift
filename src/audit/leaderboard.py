@@ -1,4 +1,4 @@
-# Path: iganer/rift/audit/leaderboard.py
+# Path: src/audit/leaderboard.py
 # Status: NEW
 """Format aggregate audit rows into a sorted leaderboard (by faithfulness_delta)."""
 def build_leaderboard(agg_rows, sort_key="faithfulness_delta"):

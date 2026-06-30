@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/visualization.py
+# Path: src/utils/visualization.py
 # Status: NEW
 """Save audit panels: original | explanation | necessity | sufficiency. torch/PIL guarded."""
 from __future__ import annotations

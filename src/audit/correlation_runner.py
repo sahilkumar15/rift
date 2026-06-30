@@ -1,4 +1,4 @@
-# Path: iganer/rift/audit/correlation_runner.py
+# Path: src/audit/correlation_runner.py
 # Status: NEW
 """Compute per-checkpoint faithfulness + AUCs, then correlate vs zero-shot AUC.
 This drives the headline 'faithfulness predicts generalization' result."""

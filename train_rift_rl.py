@@ -9,8 +9,8 @@ Accepts the same CLI shape as ablate_rift.py so scripts/run_rift.sh can drive it
 import argparse
 import sys
 
-from iganer.rift.utils.config import load_config, merge_overrides
-from iganer.rift.audit.ablation_runner import parse_overrides
+from src.utils.config import load_config, merge_overrides
+from src.audit.ablation_runner import parse_overrides
 
 
 def main():
@@ -43,9 +43,9 @@ def main():
               file=sys.stderr)
         return 2
 
-    from iganer.rift.adapters.cift_adapter import CIFTAdapter
-    from iganer.rift.data.datamodule import build_dataloaders
-    from iganer.rift.train.train_rift_rl import train
+    from src.adapters.cift_adapter import CIFTAdapter
+    from src.data.datamodule import build_dataloaders
+    from src.train.train_rift_rl import train
 
     adapter = CIFTAdapter(
         ckpt_path=ckpt, device=cfg.get_dotted("device", "cuda"),

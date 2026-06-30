@@ -1,4 +1,4 @@
-# Path: iganer/rift/adapters/cift_adapter.py
+# Path: src/adapters/cift_adapter.py
 # Status: MODIFIED (5 WIRE points completed against the real CIFT codebase)
 """
 cift_adapter.py — THE seam between RIFT and the real CIFT model

@@ -1,4 +1,4 @@
-# Path: iganer/rift/adapters/detector_adapter.py
+# Path: src/adapters/detector_adapter.py
 # Status: NEW
 """Generic detector interface so RIFT can audit non-CIFT models (Xception/SBI/etc.).
 Wrap any classifier exposing forward->logits and a feature hook."""

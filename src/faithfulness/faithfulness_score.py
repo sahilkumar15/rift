@@ -1,4 +1,4 @@
-# Path: iganer/rift/faithfulness/faithfulness_score.py
+# Path: src/faithfulness/faithfulness_score.py
 # Status: NEW
 """
 faithfulness_score.py — the causal-faithfulness math, with ZERO model dependencies.

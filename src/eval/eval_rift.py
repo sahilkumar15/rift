@@ -1,4 +1,4 @@
-# Path: iganer/rift/eval/eval_rift.py
+# Path: src/eval/eval_rift.py
 # Status: NEW
 """Evaluate a trained policy / explainer: audit on a dataset, write leaderboard."""
 from __future__ import annotations

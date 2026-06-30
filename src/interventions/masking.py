@@ -1,4 +1,4 @@
-# Path: iganer/rift/interventions/masking.py
+# Path: src/interventions/masking.py
 # Status: NEW
 """Mask utilities (spec-named). Real impl in interventions.py."""
 from .interventions import _to_binary, mask_area

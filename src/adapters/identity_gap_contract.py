@@ -1,4 +1,4 @@
-# Path: iganer/rift/adapters/identity_gap_contract.py
+# Path: src/adapters/identity_gap_contract.py
 # Status: NEW
 """
 identity_gap_contract.py  —  THE most important file in RIFT.

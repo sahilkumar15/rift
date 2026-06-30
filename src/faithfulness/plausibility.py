@@ -1,4 +1,4 @@
-# Path: iganer/rift/faithfulness/plausibility.py
+# Path: src/faithfulness/plausibility.py
 # Status: NEW
 """Plausibility = IoU between explanation mask and annotation mask (if present)."""
 from __future__ import annotations

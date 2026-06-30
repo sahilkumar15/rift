@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/config.py
+# Path: src/utils/config.py
 # Status: NEW
 """YAML config loader with dotted access + override merge."""
 from __future__ import annotations

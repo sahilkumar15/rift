@@ -2,9 +2,9 @@
 # Status: NEW
 """Entrypoint: the headline faithfulness-vs-generalization correlation experiment."""
 import argparse, json
-from iganer.rift.utils.config import load_config
-from iganer.rift.utils.io import save_json, save_csv
-from iganer.rift.audit.correlation_runner import run_correlation
+from src.utils.config import load_config
+from src.utils.io import save_json, save_csv
+from src.audit.correlation_runner import run_correlation
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--config",required=True)
     ap.add_argument("--rows_json", help="precomputed per-checkpoint rows JSON")

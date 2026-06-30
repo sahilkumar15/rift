@@ -16,9 +16,9 @@ runtime = ["torch", "torchvision", "pillow", "scipy", "tqdm", "wandb"]
 test = ["pytest"]
 
 [tool.setuptools.packages.find]
-include = ["iganer*"]
+include = ["src*"]
 
 [project.scripts]
-rift-gate1 = "iganer.rift.gates.gate1_validity:main"
-rift-gate2 = "iganer.rift.gates.gate2_separation:main"
-rift-gate3 = "iganer.rift.gates.gate3_correlation:main"
+rift-gate1 = "src.gates.gate1_validity:main"
+rift-gate2 = "src.gates.gate2_separation:main"
+rift-gate3 = "src.gates.gate3_correlation:main"

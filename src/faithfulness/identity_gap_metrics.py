@@ -1,4 +1,4 @@
-# Path: iganer/rift/faithfulness/identity_gap_metrics.py
+# Path: src/faithfulness/identity_gap_metrics.py
 # Status: NEW
 """Δ-channel deltas: drop on necessity, retained on sufficiency."""
 def necessity_delta_drop(e0, e_nec): return float(e0 - e_nec)

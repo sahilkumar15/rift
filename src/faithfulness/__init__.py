@@ -1,2 +1,2 @@
-# Path: iganer/rift/faithfulness/__init__.py
+# Path: src/faithfulness/__init__.py
 # Status: NEW

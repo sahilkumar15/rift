@@ -1,4 +1,4 @@
-# Path: iganer/rift/train/train_rift_rl.py
+# Path: src/train/train_rift_rl.py
 # Status: NEW
 """RIFT-RL training loop (importable). Freezes detector, rolls out policy in RIFTEnv,
 updates with REINFORCE/PPO. Detector + Δ come from a wired CIFTAdapter."""

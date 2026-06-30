@@ -1,4 +1,4 @@
-# Path: iganer/rift/explainers/cift_gap_explainer.py
+# Path: src/explainers/cift_gap_explainer.py
 # Status: NEW
 """CIFT's own identity-gap attribution map (the mechanism's self-explanation).
 Uses adapter.identity_gap_map() if present, else explain_identity_gap() fallback."""

@@ -1,4 +1,4 @@
-# Path: iganer/rift/data/ffpp_dataset.py
+# Path: src/data/ffpp_dataset.py
 # Status: NEW
 """
 FF++-style CSV dataset. Columns (header required):

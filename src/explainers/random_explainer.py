@@ -1,4 +1,4 @@
-# Path: iganer/rift/explainers/random_explainer.py
+# Path: src/explainers/random_explainer.py
 # Status: NEW
 """Random-mask control. Critical baseline: a faithful method must beat random."""
 from .base_explainer import BaseExplainer

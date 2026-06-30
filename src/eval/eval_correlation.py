@@ -1,4 +1,4 @@
-# Path: iganer/rift/eval/eval_correlation.py
+# Path: src/eval/eval_correlation.py
 # Status: NEW
 """Thin wrapper around audit.correlation_runner for the eval entrypoint."""
 from ..audit.correlation_runner import run_correlation

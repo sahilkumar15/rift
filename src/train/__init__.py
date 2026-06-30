@@ -1,2 +1,2 @@
-# Path: iganer/rift/train/__init__.py
+# Path: src/train/__init__.py
 # Status: NEW

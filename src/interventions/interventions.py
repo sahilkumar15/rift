@@ -1,4 +1,4 @@
-# Path: iganer/rift/interventions/interventions.py
+# Path: src/interventions/interventions.py
 # Status: NEW
 """
 interventions.py — necessity/sufficiency masking + GATE-1 validity probe.

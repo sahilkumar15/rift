@@ -1,4 +1,4 @@
-# Path: iganer/rift/gates/_io.py
+# Path: src/gates/_io.py
 # Status: NEW
 """Tiny IO helpers for the Phase-0 gate scripts. torch/PIL guarded so the module
 imports without them (sandbox); the loaders themselves require torch+PIL on Katz.

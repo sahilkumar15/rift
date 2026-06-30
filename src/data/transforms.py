@@ -1,4 +1,4 @@
-# Path: iganer/rift/data/transforms.py
+# Path: src/data/transforms.py
 # Status: NEW
 """Image transforms; torchvision if present, else identity."""
 def build_transform(size=256, train=False):

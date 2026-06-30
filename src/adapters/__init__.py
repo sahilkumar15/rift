@@ -1,2 +1,2 @@
-# Path: iganer/rift/adapters/__init__.py
+# Path: src/adapters/__init__.py
 # Status: NEW

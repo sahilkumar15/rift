@@ -1,7 +1,7 @@
 # Path: tests/test_faithfulness_metrics.py
 # Status: NEW
 import math
-from iganer.rift.faithfulness.faithfulness_score import (
+from src.faithfulness.faithfulness_score import (
     necessity, sufficiency, harmonic, compute_rift_score)
 def test_perfect_faithful():
     assert abs(necessity(1.0,0.0)-1.0)<1e-6

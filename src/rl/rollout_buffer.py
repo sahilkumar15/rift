@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/rollout_buffer.py
+# Path: src/rl/rollout_buffer.py
 # Status: NEW
 """Stores (state, action, logp, reward, value, done) for an episode/batch."""
 class RolloutBuffer:

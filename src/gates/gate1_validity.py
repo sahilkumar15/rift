@@ -1,4 +1,4 @@
-# Path: iganer/rift/gates/gate1_validity.py
+# Path: src/gates/gate1_validity.py
 # Status: NEW
 """
 gate1_validity.py  --  PHASE-0 GATE 1: intervention validity (the precondition).
@@ -13,7 +13,7 @@ Prints: mean(cited_drop) - mean(random_drop)  and a single PASS/FAIL + STOP/GO l
 Verdict: PASS if separation >= 0.15, else FAIL -> PIVOT.
 
 Run (Katz, real CIFT):
-  PYTHONPATH=. python iganer/rift/gates/gate1_validity.py \
+  PYTHONPATH=. python -m src.gates.gate1_validity.py \
       --csv slices/ffpp_forged_50.csv \
       --cift-root /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake \
       --ckpt /path/to/cift.ckpt --backbone convnextv2_base \
@@ -24,7 +24,7 @@ Run (Katz, real CIFT):
   STOP-> separation<0.15 : pivot. Do NOT train. Do NOT report downstream numbers.
 
 Offline wiring check (no torch, no ckpt):
-  python iganer/rift/gates/gate1_validity.py --selftest
+  python -m src.gates.gate1_validity --selftest
 """
 from __future__ import annotations
 import argparse
@@ -49,7 +49,7 @@ def _selftest() -> int:
     for sep in (0.31, 0.12):
         print(f"  separation={sep:.3f} -> {_decide(sep, 0.15)}")
     # sanity on the real Gate1Report dataclass (pure-logic part)
-    from iganer.rift.interventions.interventions import Gate1Report
+    from src.interventions.interventions import Gate1Report
     r = Gate1Report(n=50, mean_necessity_drop=0.62, mean_sufficiency_retained=0.58,
                     mean_random_drop=0.21, separation=0.41, verdict="")
     assert r.passed(0.15) is True
@@ -93,9 +93,9 @@ def main():
                              f"(or use --selftest for the offline wiring check).")
 
     import torch
-    from iganer.rift.adapters.cift_adapter import CIFTAdapter
-    from iganer.rift.interventions.interventions import gate1_intervention_validity
-    from iganer.rift.gates._io import load_image_minus1_1, load_mask
+    from src.adapters.cift_adapter import CIFTAdapter
+    from src.interventions.interventions import gate1_intervention_validity
+    from src.gates._io import load_image_minus1_1, load_mask
 
     rows = _load_slice(args.csv, args.n)
     adapter = CIFTAdapter(ckpt_path=args.ckpt, device=args.device, backbone=args.backbone,
@@ -124,7 +124,7 @@ def main():
 
     # We must advance the donor index in lockstep with gate1's per-pair loop; simplest is to
     # run gate1 one pair at a time and aggregate, which also lets us bind the right donor.
-    from iganer.rift.interventions.interventions import (
+    from src.interventions.interventions import (
         apply_necessity, apply_sufficiency,
     )
     nec_drops, suf_rets, rand_drops, n = [], [], [], 0

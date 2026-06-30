@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/ppo.py
+# Path: src/rl/ppo.py
 # Status: NEW
 """PPO-clip with optional Lagrangian constraint dual. torch-guarded."""
 from __future__ import annotations

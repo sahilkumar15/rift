@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/wandb_logger.py
+# Path: src/utils/wandb_logger.py
 # Status: NEW
 """W&B wrapper that no-ops cleanly when wandb is absent or disabled."""
 class WandbLogger:

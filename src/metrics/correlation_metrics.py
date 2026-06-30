@@ -1,4 +1,4 @@
-# Path: iganer/rift/metrics/correlation_metrics.py
+# Path: src/metrics/correlation_metrics.py
 # Status: NEW
 """
 correlation_metrics.py — the headline "does faithfulness predict generalization?" math.

@@ -1,4 +1,4 @@
-# Path: iganer/rift/gates/gate2_separation.py
+# Path: src/gates/gate2_separation.py
 # Status: NEW
 """
 gate2_separation.py  --  PHASE-0 GATE 2: novelty isolation (Row 2 vs Row 6).
@@ -31,14 +31,14 @@ generalizes -- is the right thing to audit. Keep that framing; do not claim (b) 
 the deployed logit.
 
 Run (Katz):
-  PYTHONPATH=. python iganer/rift/gates/gate2_separation.py \
+  PYTHONPATH=. python -m src.gates.gate2_separation.py \
       --csv slices/ffpp_forged_50.csv --cift-root ... --ckpt ... --device cuda \
       --margin 0.10
 
   READ: the three "row=" lines and the final VERDICT.
 
 Offline wiring check:
-  python iganer/rift/gates/gate2_separation.py --selftest
+  python -m src.gates.gate2_separation --selftest
 """
 from __future__ import annotations
 import argparse
@@ -73,7 +73,7 @@ def _selftest() -> int:
     for name, kw in cases:
         print(f"  [{name}] {_decide(**kw)}")
     # exercise the real faithfulness math too
-    from iganer.rift.faithfulness.faithfulness_score import necessity, sufficiency, harmonic
+    from src.faithfulness.faithfulness_score import necessity, sufficiency, harmonic
     f = harmonic(necessity(1.6, 0.2), sufficiency(1.6, 1.4))   # strong N and S
     print(f"  harmonic(strong N/S) = {f:.3f}  (sanity: should be high)")
     return 0
@@ -90,8 +90,8 @@ def _iou(a, b, thr=0.5):
 
 def _faith_on_channel(adapter, img, mask, donor, channel, mode, topk):
     """Return harmonic faithfulness for one explanation `mask` on one evidence channel."""
-    from iganer.rift.interventions.interventions import apply_necessity, apply_sufficiency
-    from iganer.rift.faithfulness.faithfulness_score import necessity, sufficiency, harmonic
+    from src.interventions.interventions import apply_necessity, apply_sufficiency
+    from src.faithfulness.faithfulness_score import necessity, sufficiency, harmonic
     if channel == "delta":
         ev = lambda x: adapter.identity_gap(x, donor=donor).value
     else:
@@ -125,9 +125,9 @@ def main():
             raise SystemExit(f"--{req.replace('_','-')} required (or --selftest).")
 
     import torch
-    from iganer.rift.adapters.cift_adapter import CIFTAdapter
-    from iganer.rift.explainers.gradcam_explainer import GradCAMExplainer
-    from iganer.rift.gates._io import load_image_minus1_1, load_mask
+    from src.adapters.cift_adapter import CIFTAdapter
+    from src.explainers.gradcam_explainer import GradCAMExplainer
+    from src.gates._io import load_image_minus1_1, load_mask
 
     rows = []
     with open(args.csv) as f:

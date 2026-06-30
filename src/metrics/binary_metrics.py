@@ -1,4 +1,4 @@
-# Path: iganer/rift/metrics/binary_metrics.py
+# Path: src/metrics/binary_metrics.py
 # Status: NEW
 """AUC / EER / AP without sklearn dependency (pure python)."""
 from __future__ import annotations

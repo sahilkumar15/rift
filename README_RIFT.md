@@ -43,37 +43,45 @@ paper §C.6, Table 10). Two consequences baked into this codebase:
 ```
 RIFT/
 ├── pyproject.toml              # installable; defines rift-gate1/2/3 console scripts
-├── conftest.py                 # makes `iganer` importable for pytest in-place
+├── conftest.py                 # makes `src` importable for pytest in-place
 ├── requirements_rift.txt
 ├── README_RIFT.md              # this file
-├── iganer/
-│   └── rift/
-│       ├── adapters/
-│       │   ├── cift_adapter.py            # ← THE seam, fully WIRED to real CIFT
-│       │   ├── identity_gap_contract.py   # honesty guard (true/proxy/error)
-│       │   └── detector_adapter.py        # generic detector wrapper (Xception/SBI/…)
-│       ├── gates/                         # ← PHASE 0 decision scripts (run these first)
-│       │   ├── gate1_validity.py          #   intervention validity (precondition)
-│       │   ├── gate2_separation.py        #   novelty isolation (Δ vs logit vs MARE)
-│       │   ├── gate3_correlation.py       #   the headline correlation test
-│       │   └── _io.py                     #   tiny image/mask loaders
-│       ├── interventions/                 # necessity/sufficiency masking + Gate-1 probe
-│       ├── faithfulness/                  # causal-faithfulness math (no model deps)
-│       ├── explainers/                    # random / gradcam / cift_gap / rift_policy / …
-│       ├── audit/                         # leaderboard + ablation + correlation runners
-│       ├── metrics/                       # binary / robustness / correlation stats
-│       ├── rl/                            # PPO/REINFORCE repair policy + env + reward
-│       ├── data/                          # CSV split dataset + transforms + datamodule
-│       ├── eval/                          # eval + correlation entrypled logic
-│       └── utils/                         # config, seed, logging, checkpointing, wandb
-├── configs/                    # YAML for audit / correlation / ablations / train / eval
-├── scripts/                    # bash launchers
+├── ABLATIONS.md                # the tick/cross ablation design (read alongside this file)
+├── src/                        # the package root (import as src.xxx)
+│   ├── adapters/
+│   │   ├── cift_adapter.py            # the seam, fully WIRED to real CIFT
+│   │   ├── identity_gap_contract.py   # honesty guard (true/proxy/error)
+│   │   └── detector_adapter.py        # generic detector wrapper (Xception/SBI/...)
+│   ├── gates/                         # PHASE 0 decision scripts (run these first)
+│   │   ├── gate1_validity.py          #   intervention validity (precondition)
+│   │   ├── gate2_separation.py        #   novelty isolation (delta vs logit vs MARE)
+│   │   ├── gate3_correlation.py       #   the headline correlation test
+│   │   └── _io.py                     #   tiny image/mask loaders
+│   ├── interventions/                 # necessity/sufficiency masking + Gate-1 probe
+│   ├── faithfulness/                  # causal-faithfulness math (no model deps)
+│   ├── explainers/                    # random / gradcam / cift_gap / rift_policy / ...
+│   ├── audit/                         # leaderboard + ablation_runner (config-driven planner)
+│   ├── metrics/                       # binary / robustness / correlation stats
+│   ├── rl/                            # PPO/REINFORCE repair policy + env + reward
+│   ├── data/                          # CSV split dataset + transforms + datamodule
+│   ├── eval/                          # eval + correlation entrypoint logic
+│   └── utils/                         # config, seed, logging, checkpointing, wandb
+├── configs/
+│   ├── rift_general.yaml       # master config (CIFT-schema dataset/model + RIFT blocks)
+│   ├── ablations_rift.yaml     # the tick/cross cell spec (read by ablate_rift.py)
+│   └── *.yaml                  # audit / correlation / train / eval configs
+├── scripts/
+│   └── run_rift.sh             # generalized launcher (gates|audit|correlation|ablations|train)
+├── ablate_rift.py              # ablation/audit dispatcher (pure-logic --dry-run + torch execution)
+├── train_rift_rl.py            # RL repair-policy entrypoint (Block 4)
+├── eval_rift.py  audit_rift.py  correlate_rift.py
 ├── tests/                      # pure-logic unit tests (run without torch)
-├── data/slices/                # example split CSV (format reference)
-├── eval_rift.py  audit_rift.py  correlate_rift.py  train_rift_rl.py
+└── data/slices/                # example split CSV (format reference)
 ```
 
-The package name is `iganer.rift` (matches every file header and the test imports).
+The package name is `src````
+
+The package name is `src` (matches every file header and the test imports).
 
 ---
 
@@ -170,7 +178,7 @@ n<15 → reported as a **trend**, not a headline.
 
 ### PHASE 1 — CIFT adapter (already wired)
 
-`iganer/rift/adapters/cift_adapter.py` is complete (WIRE 1–5), verified against the
+`src/adapters/cift_adapter.py` is complete (WIRE 1–5), verified against the
 real CIFT source (`cldm/diffusionfake.py`, `cldm/mamba_modules.py`,
 `cift_eval_complete.py`). On your **first** Katz run confirm three conventions
 (one smoke batch is enough):
@@ -181,14 +189,20 @@ If `--strict-identity-gap` raises "proxy", you forgot `donor_path`.
 
 ### PHASE 2 — Generalization + modularity (**only after Gate 1 PASS**)
 
-Config-driven 5-block ablation, multi-seed, CSV/JSON output:
+Config-driven 5-block ablation, multi-seed, CSV/JSON output, all through the one
+generalized launcher (see `ABLATIONS.md` for the full ✓/✗ cell tables):
 ```bash
-bash scripts/run_rift_audit.sh           # Block 2: audit leaderboard
-bash scripts/run_rift_correlation.sh     # Block 3: predictive correlation
-bash scripts/run_rift_ablations.sh       # Block 0/1/4: validity, method cells, H=1 vs H>1
+bash scripts/run_rift.sh --mode ablations --dry-run                       # print the ✓/✗ plan first
+bash scripts/run_rift.sh --mode ablations --seeds 0,1,2 --ckpt "$CKPT" \
+    --cift-root "$CIFT_ROOT"                                              # Blocks 0/1/2/4
+bash scripts/run_rift.sh --mode audit --ckpt "$CKPT" --cift-root "$CIFT_ROOT"          # Block 2 only
+bash scripts/run_rift.sh --mode correlation --corr-csv checkpoints_metrics.csv         # Block 3 only
 ```
 Honesty is enforced in code: proxy mode earns no Δ credit; n<5 correlations flagged;
-H=1-ties-H>1 is reported, not hidden (demotes RL to a repair note).
+H=1-ties-H>1 is reported, not hidden (demotes RL to a repair note). The legacy
+single-purpose scripts (`run_rift_audit.sh`, `run_rift_correlation.sh`,
+`run_rift_ablations.sh`) are kept in `scripts/` for reference but `run_rift.sh` is
+the supported entrypoint going forward.
 
 ### PHASE 3 — Training hardening (**only after Phase 0 GO and the method is fixed**)
 
@@ -218,7 +232,7 @@ Do not introduce distributed complexity earlier — it obscures bugs in the scie
   checkout isn't on `PYTHONPATH`; the adapter prepends `cift_root` to `sys.path`.
 - Gate 1 prints "all Δ ≈ 0" → the dual-identity path didn't activate: check that
   `donor_path` is set and that the CIFT ablation flag `use_dimf` is on.
-- `pytest` can't import `iganer` → run from the repo root, or `pip install -e .`.
+- `pytest` can't import `src` → run from the repo root, or `pip install -e .`.
 - Out-of-memory on the 80GB A100 in Phase 3 only → drop batch size, set
   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (Phase 0–2 are single-GPU,
   small-slice, and should not OOM).

@@ -1,4 +1,4 @@
-# Path: iganer/rift/explainers/external_map_explainer.py
+# Path: src/explainers/external_map_explainer.py
 # Status: NEW
 """Wrap a precomputed external saliency map (e.g., from a VLM or artifact detector)."""
 from .base_explainer import BaseExplainer

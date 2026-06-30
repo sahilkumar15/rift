@@ -1,4 +1,4 @@
-# Path: iganer/rift/audit/audit_runner.py
+# Path: src/audit/audit_runner.py
 # Status: NEW
 """Run necessity/sufficiency audit for a set of (detector x explainer) on a dataset.
 Produces per-sample rows + aggregate leaderboard rows. torch-guarded at call time."""

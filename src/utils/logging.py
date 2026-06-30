@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/logging.py
+# Path: src/utils/logging.py
 # Status: NEW
 """Minimal stdout logger with consistent prefix."""
 import logging, sys

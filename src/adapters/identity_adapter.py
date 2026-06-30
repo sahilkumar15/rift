@@ -1,4 +1,4 @@
-# Path: iganer/rift/adapters/identity_adapter.py
+# Path: src/adapters/identity_adapter.py
 # Status: NEW
 """Optional ArcFace-style identity embedding for identity_preservation constraint.
 If unavailable, identity_preservation falls back to 1.0 (no penalty) with a warning."""

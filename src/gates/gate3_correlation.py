@@ -1,4 +1,4 @@
-# Path: iganer/rift/gates/gate3_correlation.py
+# Path: src/gates/gate3_correlation.py
 # Status: NEW
 """
 gate3_correlation.py  --  PHASE-0 GATE 3: the significance test (the 4.5/5 result).
@@ -20,8 +20,8 @@ Verdict HEADLINE if:
 Else: fall back to the audit-only contribution and say so.
 
 Run:
-  PYTHONPATH=. python iganer/rift/gates/gate3_correlation.py --csv checkpoints_metrics.csv
-  python iganer/rift/gates/gate3_correlation.py --selftest     # offline, synthetic
+  PYTHONPATH=. python -m src.gates.gate3_correlation.py --csv checkpoints_metrics.csv
+  python -m src.gates.gate3_correlation --selftest     # offline, synthetic
 """
 from __future__ import annotations
 import argparse
@@ -63,7 +63,7 @@ def _decide(results, n):
 
 def _selftest() -> int:
     print("[selftest] gate3 decision logic")
-    from iganer.rift.metrics.correlation_metrics import correlate_predictors
+    from src.metrics.correlation_metrics import correlate_predictors
     # Synthetic: faithfulness tracks zero-shot, in-domain saturates (no signal).
     import random
     rng = random.Random(0)
@@ -98,7 +98,7 @@ def main():
     if not args.csv:
         raise SystemExit("--csv required (or --selftest).")
 
-    from iganer.rift.metrics.correlation_metrics import correlate_predictors
+    from src.metrics.correlation_metrics import correlate_predictors
 
     rows = []
     with open(args.csv) as f:

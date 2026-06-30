@@ -1,4 +1,4 @@
-# Path: iganer/rift/data/split_dataset.py
+# Path: src/data/split_dataset.py
 # Status: NEW
 """Deterministic train/val split by index."""
 import random

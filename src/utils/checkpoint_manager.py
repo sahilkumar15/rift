@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/checkpoint_manager.py
+# Path: src/utils/checkpoint_manager.py
 # Status: NEW
 """Top-k + latest + interval checkpointing with resume. torch-guarded."""
 from __future__ import annotations

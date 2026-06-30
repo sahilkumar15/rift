@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/policy.py
+# Path: src/rl/policy.py
 # Status: NEW
 """Grid policy network: state -> action logits + value. Small CNN+MLP. torch-guarded."""
 from __future__ import annotations

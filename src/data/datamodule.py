@@ -1,4 +1,4 @@
-# Path: iganer/rift/data/datamodule.py
+# Path: src/data/datamodule.py
 # Status: NEW
 """Bundles dataset + loaders. Falls back to a synthetic dataset when data.root is null,
 so the pipeline is runnable for smoke tests without FF++."""

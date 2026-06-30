@@ -1,2 +1,2 @@
-# Path: iganer/rift/audit/__init__.py
+# Path: src/audit/__init__.py
 # Status: NEW

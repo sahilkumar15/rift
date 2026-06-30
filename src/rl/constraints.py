@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/constraints.py
+# Path: src/rl/constraints.py
 # Status: NEW
 """Constraint cost helpers for the Lagrangian dual (identity / perceptual / sparsity)."""
 def identity_cost(identity_preservation, budget=0.95):

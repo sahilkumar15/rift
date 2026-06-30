@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/reinforce.py
+# Path: src/rl/reinforce.py
 # Status: NEW
 """REINFORCE with baseline (the simple, robust RL trainer). torch-guarded."""
 from __future__ import annotations

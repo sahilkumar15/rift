@@ -1,7 +1,7 @@
 # Path: tests/test_identity_gap_adapter.py
 # Status: NEW
 import warnings, pytest
-from iganer.rift.adapters.identity_gap_contract import (
+from src.adapters.identity_gap_contract import (
     resolve_mode, IdentityGapMode, IdentityGapResult, MechanismValidityError)
 def test_true_mode(): assert resolve_mode(True, False)==IdentityGapMode.TRUE
 def test_error_mode(): assert resolve_mode(False, True)==IdentityGapMode.ERROR

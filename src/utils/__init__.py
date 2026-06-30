@@ -1,2 +1,2 @@
-# Path: iganer/rift/utils/__init__.py
+# Path: src/utils/__init__.py
 # Status: NEW

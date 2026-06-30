@@ -1,4 +1,4 @@
-# Path: iganer/rift/explainers/rift_policy_explainer.py
+# Path: src/explainers/rift_policy_explainer.py
 # Status: NEW
 """Wrap a trained RIFT-RL policy as an explainer (deterministic eval rollout)."""
 from .base_explainer import BaseExplainer

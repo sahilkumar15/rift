@@ -1,4 +1,4 @@
-# Path: iganer/rift/rl/rift_env.py
+# Path: src/rl/rift_env.py
 # Status: NEW
 """
 RIFTEnv — a REAL multi-step MDP for explanation-evidence selection.

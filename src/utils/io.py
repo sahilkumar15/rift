@@ -1,4 +1,4 @@
-# Path: iganer/rift/utils/io.py
+# Path: src/utils/io.py
 # Status: NEW
 """CSV/JSON helpers used by audit + correlation runners."""
 import csv, json, os

@@ -1,4 +1,4 @@
-# Path: iganer/rift/adapters/vlm_adapter.py
+# Path: src/adapters/vlm_adapter.py
 # Status: NEW
 """Optional VLM explanation adapter: turns a VLM rationale + bbox into a mask.
 Stub interface; wire your Qwen2.5-VL / external map here for the VLM leaderboard row."""

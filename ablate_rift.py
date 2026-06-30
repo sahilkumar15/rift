@@ -26,8 +26,8 @@ import json
 import os
 import sys
 
-from iganer.rift.utils.config import load_config, merge_overrides
-from iganer.rift.audit.ablation_runner import (
+from src.utils.config import load_config, merge_overrides
+from src.audit.ablation_runner import (
     parse_overrides, plan_blocks, render_matrix,
 )
 
@@ -119,11 +119,11 @@ def main():
               "for a real run.", file=sys.stderr)
         return 2
 
-    from iganer.rift.adapters.cift_adapter import CIFTAdapter
-    from iganer.rift.audit.ablation_runner import (
+    from src.adapters.cift_adapter import CIFTAdapter
+    from src.audit.ablation_runner import (
         run_block1, block1_contrasts, run_block2, run_block3,
     )
-    from iganer.rift.audit.leaderboard import build_leaderboard  # noqa
+    from src.audit.leaderboard import build_leaderboard  # noqa
 
     device = cfg.get_dotted("device", "cuda")
     seeds = ([int(s) for s in args.seeds.split(",")] if args.seeds

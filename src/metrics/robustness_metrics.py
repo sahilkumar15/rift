@@ -1,4 +1,4 @@
-# Path: iganer/rift/metrics/robustness_metrics.py
+# Path: src/metrics/robustness_metrics.py
 # Status: NEW
 """Robustness gap + attacked-vs-clean helpers."""
 def robustness_gap(clean_auc, attacked_auc): return float(clean_auc - attacked_auc)
