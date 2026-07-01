@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import re
 from pathlib import Path
 
@@ -11,9 +12,10 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 
 def list_images(d: Path):
-    out = []
     if not d.exists() or not d.is_dir():
-        return out
+        return []
+
+    out = []
 
     for ext in IMAGE_EXTS:
         out.extend(sorted(d.glob(f"*{ext}")))
@@ -30,101 +32,82 @@ def parse_pair(name: str):
     return m.group(1), m.group(2)
 
 
-def unique(paths):
-    seen = set()
-    out = []
-
-    for p in paths:
-        p = Path(p)
-        try:
-            k = str(p.resolve())
-        except Exception:
-            k = str(p)
-
-        if k not in seen:
-            seen.add(k)
-            out.append(Path(k))
-
-    return out
-
-
-def find_method_roots(root: Path, method: str, compression: str):
-    candidates = [
-        root / "manipulated_sequences" / method / compression / "frames",
-        root / "manipulated_sequences" / method / compression / "images",
-        root / "manipulated_sequences" / method / compression,
-        root / method / compression / "frames",
-        root / method / compression / "images",
-        root / method / compression,
-        root / method / "frames",
-        root / method / "images",
-        root / method,
-    ]
-
-    candidates += list(root.glob(f"**/{method}/{compression}/frames"))
-    candidates += list(root.glob(f"**/{method}/{compression}/images"))
-    candidates += list(root.glob(f"**/{method}/{compression}"))
-
-    return [p for p in unique(candidates) if p.exists() and p.is_dir()]
-
-
-def find_pair_dirs(method_root: Path):
-    pair_dirs = []
-
-    for d in sorted(method_root.iterdir()) if method_root.exists() else []:
-        if d.is_dir() and parse_pair(d.name) and list_images(d):
-            pair_dirs.append(d)
-
-    if not pair_dirs:
-        for d in method_root.glob("**/*"):
-            if d.is_dir() and parse_pair(d.name) and list_images(d):
-                pair_dirs.append(d)
-
-    return unique(pair_dirs)
-
-
-def find_source_dir(root: Path, source_id: str, compression: str):
-    candidates = [
-        root / "original_sequences" / "youtube" / compression / "frames" / source_id,
-        root / "original_sequences" / "youtube" / compression / "images" / source_id,
-        root / "original_sequences" / "youtube" / compression / source_id,
-        root / "original_sequences" / "youtube" / "raw" / "frames" / source_id,
-        root / "original_sequences" / "youtube" / "raw" / "images" / source_id,
-        root / "youtube" / compression / "frames" / source_id,
-        root / "youtube" / compression / "images" / source_id,
-        root / "youtube" / "frames" / source_id,
-        root / "youtube" / "images" / source_id,
-        root / "donor_ref" / source_id,
-        root / "original" / source_id,
-    ]
-
-    for d in candidates:
-        if d.exists() and d.is_dir() and list_images(d):
-            return d
-
-    for d in root.glob(f"**/{source_id}"):
-        if not d.is_dir() or not list_images(d):
-            continue
-
-        s = str(d).lower()
-
-        if "original" in s or "youtube" in s or "donor" in s:
-            return d
+def choose_existing_dir(candidates):
+    """Return the first existing directory. Do not scan parent if images exists."""
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            return c
 
     return None
 
 
-def choose_donor(source_dir: Path, forged_img: Path):
-    exact = source_dir / forged_img.name
+def method_root(ffpp_root: Path, method: str, compression: str):
+    # Prefer exact CIFT-style path.
+    return choose_existing_dir(
+        [
+            ffpp_root / "manipulated_sequences" / method / compression / "images",
+            ffpp_root / "manipulated_sequences" / method / compression / "frames",
+            ffpp_root / "manipulated_sequences" / method / compression,
+        ]
+    )
 
-    if exact.exists():
-        return exact
 
-    for ext in IMAGE_EXTS:
-        p = source_dir / f"{forged_img.stem}{ext}"
+def original_root(ffpp_root: Path, compression: str):
+    return choose_existing_dir(
+        [
+            ffpp_root / "original_sequences" / "youtube" / compression / "images",
+            ffpp_root / "original_sequences" / "youtube" / compression / "frames",
+            ffpp_root / "original_sequences" / "youtube" / compression,
+        ]
+    )
 
-        if p.exists():
-            return p
+
+def find_pair_dirs(root: Path):
+    out = []
+
+    # Normal FF++ layout:
+    #   manipulated_sequences/Deepfakes/c23/images/000_003/*.png
+    for d in sorted(root.iterdir()) if root.exists() else []:
+        if d.is_dir() and parse_pair(d.name) and list_images(d):
+            out.append(d)
+
+    return out
+
+
+def source_dir_from_original_root(orig_root: Path, source_id: str):
+    d = orig_root / source_id
+
+    if d.exists() and d.is_dir() and list_images(d):
+        return d
+
+    # Fallback only if direct path is not present.
+    for cand in sorted(orig_root.glob(f"**/{source_id}")):
+        if cand.exists() and cand.is_dir() and list_images(cand):
+            return cand
+
+    return None
+
+
+def donor_frame_stem(source_id: str, forged_img: Path):
+    # forged stem: 000_003_0015
+    # donor stem : 000_0015
+    m = re.search(r"_(\d+)$", forged_img.stem)
+
+    if m:
+        return f"{source_id}_{m.group(1)}"
+
+    return None
+
+
+def choose_donor(source_dir: Path, source_id: str, forged_img: Path):
+    stem = donor_frame_stem(source_id, forged_img)
+
+    if stem:
+        for ext in IMAGE_EXTS:
+            p = source_dir / f"{stem}{ext}"
+
+            if p.exists():
+                return p
 
     imgs = list_images(source_dir)
 
@@ -134,96 +117,108 @@ def choose_donor(source_dir: Path, forged_img: Path):
     return None
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ffpp-root", default="/scratch/sahil/projects/img_deepfake/datasets/ffpp")
-    ap.add_argument("--compression", default="c23")
-    ap.add_argument("--out-csv", default="data/slices/rift_ffpp_rela.csv")
-    ap.add_argument("--methods", default="Deepfakes,Face2Face,FaceSwap,NeuralTextures")
-    ap.add_argument("--max-items", type=int, default=200)
-    ap.add_argument("--max-per-pair", type=int, default=5)
-    args = ap.parse_args()
+def build_rows(args):
+    # Important:
+    # Do NOT call .resolve().
+    # .resolve() can turn logical c23 symlink paths into raw paths.
+    ffpp_root = Path(args.ffpp_root).expanduser()
 
-    root = Path(args.ffpp_root).expanduser().resolve()
+    if not ffpp_root.exists():
+        raise FileNotFoundError(f"FF++ root not found: {ffpp_root}")
 
-    if not root.exists():
-        raise FileNotFoundError(f"FF++ root not found: {root}")
+    orig_root = original_root(ffpp_root, args.compression)
+
+    if orig_root is None:
+        raise FileNotFoundError(
+            f"Could not find original youtube {args.compression} root under {ffpp_root}"
+        )
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    rows = []
 
-    print(f"[INFO] FF++ root: {root}")
-    print(f"[INFO] compression: {args.compression}")
-    print(f"[INFO] methods: {methods}")
+    print(f"[INFO] FF++ root      : {ffpp_root}")
+    print(f"[INFO] compression    : {args.compression}")
+    print(f"[INFO] original root  : {orig_root}")
+    print(f"[INFO] methods        : {methods}")
+    print(f"[INFO] max_items      : {args.max_items}")
+    print(f"[INFO] max_per_pair   : {args.max_per_pair}")
+
+    rows = []
+    rng = random.Random(args.seed)
 
     for method in methods:
-        method_roots = find_method_roots(root, method, args.compression)
-        print(f"[INFO] method={method} roots={len(method_roots)}")
+        mroot = method_root(ffpp_root, method, args.compression)
 
-        for method_root in method_roots:
-            pair_dirs = find_pair_dirs(method_root)
-            print(f"[INFO]   {method_root} pair_dirs={len(pair_dirs)}")
+        if mroot is None:
+            print(f"[WARN] missing method root for method={method}, compression={args.compression}")
+            continue
 
-            for pair_dir in pair_dirs:
-                parsed = parse_pair(pair_dir.name)
+        pair_dirs = find_pair_dirs(mroot)
 
-                if not parsed:
+        print(f"[INFO] method={method} root={mroot} pair_dirs={len(pair_dirs)}")
+
+        if args.shuffle:
+            rng.shuffle(pair_dirs)
+
+        for pair_dir in pair_dirs:
+            parsed = parse_pair(pair_dir.name)
+
+            if not parsed:
+                continue
+
+            source_id, target_id = parsed
+            src_dir = source_dir_from_original_root(orig_root, source_id)
+
+            if src_dir is None:
+                print(f"[WARN] missing source donor dir source_id={source_id} pair={pair_dir}")
+                continue
+
+            forged_imgs = list_images(pair_dir)
+
+            if args.shuffle:
+                rng.shuffle(forged_imgs)
+
+            forged_imgs = forged_imgs[: args.max_per_pair]
+
+            for forged_img in forged_imgs:
+                donor_img = choose_donor(src_dir, source_id, forged_img)
+
+                if donor_img is None:
                     continue
 
-                source_id, target_id = parsed
-                source_dir = find_source_dir(root, source_id, args.compression)
+                # Use absolute logical path, not resolved symlink target.
+                image_path = str(forged_img.absolute())
+                donor_path = str(donor_img.absolute())
 
-                if source_dir is None:
-                    print(f"[WARN] no source/donor dir for source_id={source_id}; skipping {pair_dir}")
-                    continue
+                rows.append(
+                    {
+                        "image_path": image_path,
+                        "label": "1",
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "manipulation_type": method,
+                        "mask_path": "",
+                        "donor_path": donor_path,
+                        "metadata_json": json.dumps(
+                            {
+                                "ffpp_root": str(ffpp_root),
+                                "compression": args.compression,
+                                "method_root": str(mroot),
+                                "pair_dir": str(pair_dir),
+                                "source_dir": str(src_dir),
+                                "builder": "rift_strict_c23_no_resolve",
+                            }
+                        ),
+                    }
+                )
 
-                for forged_img in list_images(pair_dir)[: args.max_per_pair]:
-                    donor_img = choose_donor(source_dir, forged_img)
+                if args.max_items > 0 and len(rows) >= args.max_items:
+                    return rows
 
-                    if donor_img is None:
-                        continue
+    return rows
 
-                    rows.append(
-                        {
-                            "image_path": str(forged_img.resolve()),
-                            "label": "1",
-                            "source_id": source_id,
-                            "target_id": target_id,
-                            "manipulation_type": method,
-                            "mask_path": "",
-                            "donor_path": str(donor_img.resolve()),
-                            "metadata_json": json.dumps(
-                                {
-                                    "ffpp_root": str(root),
-                                    "method_root": str(method_root),
-                                    "pair_dir": str(pair_dir),
-                                    "source_dir": str(source_dir),
-                                }
-                            ),
-                        }
-                    )
 
-                    if len(rows) >= args.max_items:
-                        break
-
-                if len(rows) >= args.max_items:
-                    break
-
-            if len(rows) >= args.max_items:
-                break
-
-        if len(rows) >= args.max_items:
-            break
-
-    if not rows:
-        print("[ERROR] Could not find forged+donor pairs.")
-        print("Inspect your FF++ tree with:")
-        print(f"find {root} -maxdepth 6 -type d | head -300")
-        print(f"find {root} -type f \\( -name '*.png' -o -name '*.jpg' \\) | head -100")
-        raise SystemExit(2)
-
-    out = Path(args.out_csv)
-    out.parent.mkdir(parents=True, exist_ok=True)
+def write_csv(rows, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
         "image_path",
@@ -236,13 +231,68 @@ def main():
         "metadata_json",
     ]
 
-    with open(out, "w", newline="") as f:
+    with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
 
-    print(f"[OK] wrote {out}")
-    print(f"[OK] rows={len(rows)}")
+
+def write_split(rows, train_csv: Path, val_csv: Path, val_frac: float, seed: int):
+    rows = list(rows)
+    rng = random.Random(seed)
+    rng.shuffle(rows)
+
+    n_val = int(round(len(rows) * val_frac))
+
+    val = rows[:n_val]
+    train = rows[n_val:]
+
+    write_csv(train, train_csv)
+    write_csv(val, val_csv)
+
+    print(f"[OK] train rows={len(train)} -> {train_csv}")
+    print(f"[OK] val rows={len(val)} -> {val_csv}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+
+    ap.add_argument("--ffpp-root", default="/scratch/sahil/projects/img_deepfake/datasets/ffpp")
+    ap.add_argument("--compression", default="c23")
+    ap.add_argument("--methods", default="Deepfakes,Face2Face,FaceSwap,NeuralTextures")
+    ap.add_argument("--max-items", type=int, default=0, help="0 = all rows")
+    ap.add_argument("--max-per-pair", type=int, default=50)
+
+    ap.add_argument("--out-csv", default="data/slices/rift_ffpp_rela_c23_full.csv")
+    ap.add_argument("--make-split", action="store_true")
+    ap.add_argument("--train-csv", default="data/slices/rift_ffpp_train_c23_full.csv")
+    ap.add_argument("--val-csv", default="data/slices/rift_ffpp_val_c23_full.csv")
+    ap.add_argument("--val-frac", type=float, default=0.2)
+
+    ap.add_argument("--seed", type=int, default=3407)
+    ap.add_argument("--shuffle", action="store_true")
+
+    args = ap.parse_args()
+
+    rows = build_rows(args)
+
+    if not rows:
+        raise SystemExit("[ERROR] no rows built")
+
+    write_csv(rows, Path(args.out_csv))
+
+    print(f"[OK] wrote rows={len(rows)} -> {args.out_csv}")
+
+    if args.make_split:
+        write_split(
+            rows,
+            Path(args.train_csv),
+            Path(args.val_csv),
+            args.val_frac,
+            args.seed,
+        )
+
+    print("[preview]")
 
     for r in rows[:5]:
         print("image:", r["image_path"])

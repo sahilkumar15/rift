@@ -207,9 +207,13 @@ def make_explainer(name: str, adapter=None):
 def iter_audit_samples(cfg, device="cuda", n: Optional[int] = None):
     """Yield (image, donor, gt_mask) from the RIFT split CSV.
 
-    Required for strict donor-grounded RIFT:
-      image_path must exist
-      donor_path/source_ref_path must exist
+    Supports multi-GPU audit sharding:
+      dataset.shard_id
+      dataset.shard_count
+
+    Important:
+      dataset.max_items is treated as the GLOBAL cap across all shards.
+      Example: max_items=200, shard_count=4 -> each shard gets about 50 samples.
     """
     import csv as _csv
     from pathlib import Path as _Path
@@ -228,13 +232,38 @@ def iter_audit_samples(cfg, device="cuda", n: Optional[int] = None):
         raise FileNotFoundError(f"RIFT split CSV not found: {csv_path}")
 
     cap = n if n is not None else (cfg.get_dotted("dataset.max_items") or 200)
+
+    try:
+        cap = int(cap)
+    except Exception:
+        cap = 200
+
     strict = bool(cfg.get_dotted("detector.strict_identity_gap", True))
 
-    count = 0
+    shard_id = int(cfg.get_dotted("dataset.shard_id", 0) or 0)
+    shard_count = int(cfg.get_dotted("dataset.shard_count", 1) or 1)
+
+    if shard_id < 0 or shard_id >= shard_count:
+        raise RuntimeError(
+            f"Invalid shard setting: shard_id={shard_id}, shard_count={shard_count}"
+        )
+
+    yielded = 0
+    eligible_idx = 0
 
     with open(csv_path, newline="") as f:
         for row_idx, r in enumerate(_csv.DictReader(f), start=2):
             if str(r.get("label", "1")).strip() not in ("1", "fake", "forged", "True", "true"):
+                continue
+
+            # GLOBAL cap before sharding. This prevents 4 workers from doing 4x work.
+            if eligible_idx >= cap:
+                break
+
+            take_this = (eligible_idx % shard_count == shard_id)
+            eligible_idx += 1
+
+            if not take_this:
                 continue
 
             image_path = r.get("image_path")
@@ -261,10 +290,7 @@ def iter_audit_samples(cfg, device="cuda", n: Optional[int] = None):
 
             yield img, donor, gt
 
-            count += 1
-
-            if count >= cap:
-                break
+            yielded += 1
 
 
 def run_block1(cfg, adapter, cells, seeds=(0,), device="cuda") -> List[Dict[str, Any]]:
@@ -341,11 +367,20 @@ def run_block2(cfg, adapter, explainers, device="cuda") -> Tuple[List[str], List
 
     agg_rows = []
 
-    total = cfg.get_dotted("dataset.max_items") or 200
+    total_global = cfg.get_dotted("dataset.max_items") or 200
+
     try:
-        total = int(total)
+        total_global = int(total_global)
     except Exception:
-        total = 200
+        total_global = 200
+
+    shard_id = int(cfg.get_dotted("dataset.shard_id", 0) or 0)
+    shard_count = int(cfg.get_dotted("dataset.shard_count", 1) or 1)
+
+    if shard_count > 1:
+        total = max(0, (total_global - 1 - shard_id) // shard_count + 1)
+    else:
+        total = total_global
 
     for name in explainers:
         ex = make_explainer(name, adapter)

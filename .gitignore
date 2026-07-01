@@ -8,7 +8,7 @@ wandb/
 outputs/
 backup_pathfix_20260701_012620/
 data/slices/
-
+*bak*
 # C extensions
 *.so
 

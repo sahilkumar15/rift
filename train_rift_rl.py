@@ -34,6 +34,13 @@ def _flat_train_cfg(cfg):
     data_cfg.setdefault("batch_size", cfg.get_dotted("train.batch_size", 8))
     data_cfg.setdefault("num_workers", cfg.get_dotted("data.num_workers", 0))
 
+    # RIFT PATCH: let --smoke / dataset.max_items actually limit train/val.
+    max_items = cfg.get_dotted("data.max_items", None)
+    if max_items is None:
+        max_items = cfg.get_dotted("dataset.max_items", None)
+    if max_items is not None:
+        data_cfg["max_items"] = int(max_items)
+
     data_cfg["strict_identity_gap"] = _as_bool(
         cfg.get_dotted("detector.strict_identity_gap", cfg.get("strict_identity_gap", False))
     )
@@ -91,6 +98,24 @@ def main():
         ov["detector.cift_root"] = args.cift_root
     if args.device:
         ov["device"] = args.device
+
+    # torchrun/DDP: bind each process to its own GPU before loading CIFT.
+    import os
+
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        try:
+            import torch
+
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
+            ov["device"] = f"cuda:{local_rank}"
+            ov["distributed.enabled"] = True
+            ov["distributed.local_rank"] = local_rank
+            ov["distributed.rank"] = int(os.environ.get("RANK", "0"))
+            ov["distributed.world_size"] = int(os.environ.get("WORLD_SIZE", "1"))
+        except Exception as e:
+            print(f"[train_rift_rl] failed to set DDP CUDA device: {e}", file=sys.stderr)
+            return 2
 
     cfg = merge_overrides(cfg, ov)
 

@@ -48,20 +48,45 @@ def _enabled_blocks(cfg, block_arg):
     return enabled
 
 
+def _format_cell(v, ndigits=4):
+    """Format floats cleanly for paper-ready CSV tables."""
+    if v is None:
+        return ""
+
+    if isinstance(v, bool):
+        return v
+
+    if isinstance(v, float):
+        if v != v:  # NaN
+            return ""
+        return f"{v:.{ndigits}f}"
+
+    return v
+
+
+def _format_row(row, ndigits=4):
+    return {k: _format_cell(v, ndigits=ndigits) for k, v in row.items()}
+
+
 def _write_table(path, rows):
     if not rows:
         return
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
     cols = []
+
     for r in rows:
         for k in r:
             if k not in cols:
                 cols.append(k)
+
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
+
         for r in rows:
-            w.writerow(r)
+            w.writerow(_format_row(r, ndigits=4))
 
 
 def main():

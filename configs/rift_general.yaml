@@ -1,35 +1,72 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RIFT — Reinforced Identity-Gap Faithfulness Testing
+#
+# This config follows the CIFT training protocol:
+#   FF++ relation data, c23 compression, donor/reference stream enabled.
+#
+# RIFT is not training CIFT. CIFT is frozen.
+# RIFT trains only the explanation-repair RL policy.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 seed: 3407
 device: cuda
-torch_home: ''
+torch_home: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Frozen detector: CIFT
+# ─────────────────────────────────────────────────────────────────────────────
 detector:
   type: cift
   backbone: convnextv2_base
-  cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
-  cift_config: configs/diffusionfake_mixed.yaml
   cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+  cift_config: configs/diffusionfake_mixed.yaml
+  cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
+
+  # Keep true for real RIFT. This forces donor-grounded identity-gap mode.
   strict_identity_gap: true
+
 checkpoints:
   glob: null
   explicit: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# Important:
+#   RIFT uses explicit CSVs with image_path + donor_path.
+#   Build them using scripts/build_rift_csv_from_cift_ffpp.py.
+# ─────────────────────────────────────────────────────────────────────────────
 dataset:
   name: ffpp_rela
   format: csv_split
-  split_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
-  max_items: 200
+
+  # Default audit CSV. Can be overridden with --csv.
+  split_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela_c23.csv
+
+  # null means use all rows in the CSV.
+  # Override from CLI for smoke/debug:
+  #   dataset.max_items=200
+  max_items: null
+
   ffpp_rela:
     data_root: /scratch/sahil/projects/img_deepfake/datasets/ffpp
+    data_types: ""
     compressions: c23
     num_frames: 50
     methods:
-    - youtube
-    - Deepfakes
-    - Face2Face
-    - FaceSwap
-    - NeuralTextures
+      - youtube
+      - Deepfakes
+      - Face2Face
+      - FaceSwap
+      - NeuralTextures
+    has_mask: false
+    balance: true
     relation_data: true
     use_splits: true
+    strict_splits: true
     splits_dirname: splits
     csv_dirname: split_csv2
+    random_patch: null
+
   zero_shot:
     celeb_df:
       data_root: /scratch/sahil/projects/img_deepfake/datasets/celebdf
@@ -43,26 +80,32 @@ dataset:
     diffswap:
       data_root: /scratch/sahil/projects/img_deepfake/datasets/diffswap
       split_csv: /scratch/sahil/projects/img_deepfake/datasets/diffswap/split_csv2/diffswap_test.csv
+
 transform:
   image_size: 256
-  mean:
-  - 0.5
-  - 0.5
-  - 0.5
-  std:
-  - 0.5
-  - 0.5
-  - 0.5
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DataLoader config for RL training
+# ─────────────────────────────────────────────────────────────────────────────
 data:
   num_workers: 4
   image_size: 256
-  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
-  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
+
+  # Default train/val. Override from CLI if needed.
+  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23.csv
+  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23.csv
+
   strict_identity_gap: true
+  batch_size: 8
+  max_items: null
+
 intervention:
   mode: blur
   topk_frac: 0.12
   random_control: true
+
 faithfulness:
   weights:
     w_delta: 1.0
@@ -73,31 +116,35 @@ faithfulness:
     w_plausibility: 0.0
   delta_floor: 0.0
   logit_floor: 0.0
+
 explainers:
-- random
-- gradcam_logit
-- cift_gap
-- annotation
-- vlm_external
-- rift_policy
+  - random
+  - gradcam_logit
+  - cift_gap
+  - rift_policy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RL policy
+# ─────────────────────────────────────────────────────────────────────────────
 rl:
   algo: ppo
   horizon: 4
   grid: 8
   hidden: 256
+
+  # Conservative stable LR for current CIFT-heavy environment.
   lr: 3.0e-05
   clip: 0.2
   entropy_coef: 0.01
   value_coef: 0.5
   ppo_epochs: 4
-  epochs: 30
+  epochs: 20
   protection: true
+  reward_preset: full_rift
+
 ablation:
   spec: configs/ablations_rift.yaml
-  seeds:
-  - 0
-  - 1
-  - 2
+  seeds: [0, 1, 2]
   blocks:
     block0_validity: true
     block1_method: true
@@ -106,34 +153,43 @@ ablation:
     block4_rl: true
   min_sep: 0.15
   headline_min_n: 15
+
 output:
   root: experiments
-  name: RIFT_ffpp_audit
+  name: RIFT_ffpp_c23
   table_csv: outputs/table_rift.csv
   per_cell_dir: outputs/cells
   leaderboard_csv: outputs/leaderboard.csv
   correlation_json: outputs/correlation.json
+
 wandb:
   enabled: true
   project: RIFT_ICLR
   entity: null
-  group: rift_ablations_ffpp
+  group: rift_ffpp_c23
   name: null
   tags:
-  - rift
-  - faithfulness
-  - identity-gap
-  - audit
-  - convnextv2_base
-  - ffpp
+    - rift
+    - faithfulness
+    - identity-gap
+    - audit
+    - convnextv2_base
+    - ffpp
+    - c23
   mode: online
   log_model: false
-resume: auto
+
+# Important:
+#   keep none as default for clean experiments.
+#   use resume=auto only when intentionally continuing.
+resume: none
+
 checkpoint:
   dir: outputs/ckpt
-  metric: faithfulness_delta
+  metric: rift_score
   mode: max
-  save_every: 10
+  save_every: 5
   top_k: 3
+
 amp:
   enabled: false

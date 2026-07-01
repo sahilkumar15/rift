@@ -203,17 +203,51 @@ class CIFTAdapter:
         return logits
 
     def extract_features(self, x: "Any") -> "Any":
-        """# === WIRE 3 === (B,1792,h,w) spatial map used by SMC; for Grad-CAM + policy state.
-        Captured via a forward hook on control_model.encoder_proj (set in load_detector)."""
+        """# === WIRE 3 === spatial map used by SMC; for policy state/explainers.
+
+        CIFT may internally concatenate/process source+target streams, so the hook can
+        capture a feature batch larger than the RIFT image batch. RIFT policy state
+        requires feature batch == image/mask batch. Therefore we crop/repeat safely.
+        """
         if not _HAS_TORCH:
             raise RuntimeError("WIRE 3 needs torch (Katz).")
+
+        x = x.to(self.device).float()
+        target_b = int(x.shape[0])
+
         self._spatial_feat = None
+
         with torch.no_grad():
             self._forward(x, donor=None)
+
         if self._spatial_feat is None:
-            raise RuntimeError("No spatial feature captured - encoder_proj is Identity for this "
-                               "backbone; hook a different layer or use global_pool input.")
-        return self._spatial_feat
+            raise RuntimeError(
+                "No spatial feature captured - encoder_proj is Identity for this "
+                "backbone; hook a different layer or use global_pool input."
+            )
+
+        feat = self._spatial_feat
+
+        if not torch.is_tensor(feat):
+            raise RuntimeError(f"Captured CIFT feature is not a tensor: {type(feat)}")
+
+        # Expected: feat batch == x batch.
+        if feat.shape[0] == target_b:
+            return feat
+
+        # Common CIFT case: source+target stacked, e.g. feat batch = 2 * image batch.
+        # The analyzed target/hint stream is what RIFT needs; taking the last B is safest.
+        if feat.shape[0] > target_b:
+            return feat[-target_b:].contiguous()
+
+        # Rare case: feature batch smaller than image batch.
+        if feat.shape[0] == 1 and target_b > 1:
+            return feat.repeat(target_b, 1, 1, 1).contiguous()
+
+        raise RuntimeError(
+            f"CIFT feature batch mismatch: feature batch={feat.shape[0]}, "
+            f"image batch={target_b}, feature shape={tuple(feat.shape)}"
+        )
 
     # ------------------------------------------------------- identity gap delta
     def identity_gap(

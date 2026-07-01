@@ -1,26 +1,78 @@
+# Path: src/data/datamodule.py
 """Bundles dataset + loaders.
 
-For real CIFT/RIFT runs, pass data.train_csv and data.val_csv.
+DDP behavior:
+  If launched with torchrun, this uses DistributedSampler so each GPU sees a
+  different shard of the same dataset.
 
-Path handling:
-  If the CSV contains placeholder /data/ffpp paths, pass:
-
-    data.data_root=/actual/ffpp/root
-
-  or:
-
-    data.path_prefix_from=/data/ffpp
-    data.path_prefix_to=/actual/ffpp/root
+Example:
+  torchrun --nproc_per_node=4 train_rift_rl.py ...
+    rank 0 -> shard 0
+    rank 1 -> shard 1
+    rank 2 -> shard 2
+    rank 3 -> shard 3
 """
+
 from __future__ import annotations
 
+import os
+
 from .ffpp_dataset import FFPPDataset
+
+
+def _is_ddp_env():
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def _dist_rank_world():
+    rank = int(os.environ.get("RANK", "0"))
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    return rank, world, local_rank
+
+
+def _parse_max_items(v):
+    if v is None:
+        return None
+
+    if isinstance(v, str):
+        if v.strip().lower() in ("", "none", "null", "false", "0"):
+            return None
+
+    try:
+        v = int(v)
+    except Exception:
+        return None
+
+    return v if v > 0 else None
+
+
+def _maybe_subset(ds, max_items):
+    max_items = _parse_max_items(max_items)
+
+    if max_items is None:
+        return ds
+
+    try:
+        from torch.utils.data import Subset
+    except Exception:
+        return ds
+
+    n = min(len(ds), max_items)
+    return Subset(ds, list(range(n)))
+
+
+def _identity_gap_mode(ds):
+    # If Subset, original dataset is ds.dataset.
+    base = getattr(ds, "dataset", ds)
+    return getattr(base, "identity_gap_mode", "unknown")
 
 
 def build_dataloaders(cfg):
     try:
         import torch  # noqa: F401
         from torch.utils.data import DataLoader
+        from torch.utils.data.distributed import DistributedSampler
     except Exception:
         raise RuntimeError("torch required.")
 
@@ -66,25 +118,67 @@ def build_dataloaders(cfg):
         **common,
     )
 
+    train = _maybe_subset(train, cfg.get("max_items"))
+    val = _maybe_subset(val, cfg.get("val_max_items", cfg.get("max_items")))
+
+    ddp = _is_ddp_env()
+
+    if ddp:
+        rank, world, _ = _dist_rank_world()
+
+        train_sampler = DistributedSampler(
+            train,
+            num_replicas=world,
+            rank=rank,
+            shuffle=True,
+            drop_last=False,
+        )
+
+        val_sampler = DistributedSampler(
+            val,
+            num_replicas=world,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    else:
+        train_sampler = None
+        val_sampler = None
+
     def coll(b):
         return b
 
+    train_loader = DataLoader(
+        train,
+        batch_size=cfg.get("batch_size", 8),
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=cfg.get("num_workers", 0),
+        pin_memory=True,
+        collate_fn=coll,
+    )
+
+    val_loader = DataLoader(
+        val,
+        batch_size=cfg.get("batch_size", 8),
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=cfg.get("num_workers", 0),
+        pin_memory=True,
+        collate_fn=coll,
+    )
+
+    if ddp and int(os.environ.get("RANK", "0")) == 0:
+        print(
+            f"[ddp datamodule] world={os.environ.get('WORLD_SIZE')} "
+            f"train_total={len(train)} val_total={len(val)} "
+            f"per_rank_train≈{len(train_loader.dataset) // int(os.environ.get('WORLD_SIZE', '1'))}"
+        )
+
     return (
-        DataLoader(
-            train,
-            batch_size=cfg.get("batch_size", 8),
-            shuffle=True,
-            num_workers=cfg.get("num_workers", 0),
-            collate_fn=coll,
-        ),
-        DataLoader(
-            val,
-            batch_size=cfg.get("batch_size", 8),
-            shuffle=False,
-            num_workers=cfg.get("num_workers", 0),
-            collate_fn=coll,
-        ),
-        train.identity_gap_mode,
+        train_loader,
+        val_loader,
+        _identity_gap_mode(train),
     )
 
 
