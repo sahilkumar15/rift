@@ -36,7 +36,7 @@ RIFT_PKG="${RIFT_ROOT}"
 CIFT_ROOT="/scratch/sahil/projects/img_deepfake/code/ImageDifussionFake"
 
 CONFIG="${RIFT_ROOT}/configs/rift_general.yaml"
-CSV="${RIFT_ROOT}/data/slices/example_ffpp_forged.csv"
+CSV="${RIFT_ROOT}/data/slices/rift_ffpp_rela.csv"
 
 GPUS="0,1,2,3"
 EPOCHS=20
@@ -167,8 +167,7 @@ case "$MODE" in
     [[ -n "$CSV" ]] && OV+=( "data.train_csv=${CSV}" "data.val_csv=${CSV}" )
 
     echo "─── RL repair policy (horizon=${HORIZON:-config}) ───"
-    python "${RIFT_ROOT}/train_rift_rl.py" -c "$CONFIG" --cift-root "$CIFT_ROOT" "${OV[@]}" \
-      || echo "[train] see train_rift_rl.py; wire the policy loop on Katz."
+    python "${RIFT_ROOT}/train_rift_rl.py" -c "$CONFIG" --cift-root "$CIFT_ROOT" "${OV[@]}"
     ;;
 
   *)

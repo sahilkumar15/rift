@@ -205,28 +205,64 @@ def make_explainer(name: str, adapter=None):
 
 
 def iter_audit_samples(cfg, device="cuda", n: Optional[int] = None):
-    """Yield (image, donor, gt_mask, ckpt_unused) from the split CSV.
-    Requires torch+PIL. Donor missing -> proxy mode downstream."""
+    """Yield (image, donor, gt_mask) from the RIFT split CSV.
+
+    Required for strict donor-grounded RIFT:
+      image_path must exist
+      donor_path/source_ref_path must exist
+    """
     import csv as _csv
+    from pathlib import Path as _Path
     from ..gates._io import load_image_minus1_1, load_mask
+
     csv_path = cfg.get_dotted("dataset.split_csv")
+
     if not csv_path:
-        raise RuntimeError("dataset.split_csv is not set; point it at a RIFT split CSV "
-                           "(see data/slices/example_ffpp_forged.csv).")
+        raise RuntimeError(
+            "dataset.split_csv is not set. Build/use data/slices/rift_ffpp_rela.csv."
+        )
+
+    csv_path = str(csv_path)
+
+    if not _Path(csv_path).exists():
+        raise FileNotFoundError(f"RIFT split CSV not found: {csv_path}")
+
     cap = n if n is not None else (cfg.get_dotted("dataset.max_items") or 200)
+    strict = bool(cfg.get_dotted("detector.strict_identity_gap", True))
+
     count = 0
-    with open(csv_path) as f:
-        for r in _csv.DictReader(f):
-            if str(r.get("label", "1")).strip() not in ("1", "fake", "forged"):
+
+    with open(csv_path, newline="") as f:
+        for row_idx, r in enumerate(_csv.DictReader(f), start=2):
+            if str(r.get("label", "1")).strip() not in ("1", "fake", "forged", "True", "true"):
                 continue
-            img = load_image_minus1_1(r["image_path"], device=device)
-            donor = None
-            dp = r.get("donor_path") or r.get("source_ref_path")
-            if dp:
-                donor = load_image_minus1_1(dp, device=device)
-            gt = load_mask(r["mask_path"], like=img) if r.get("mask_path") else None
+
+            image_path = r.get("image_path")
+            donor_path = r.get("donor_path") or r.get("source_ref_path")
+            mask_path = r.get("mask_path") or ""
+
+            if not image_path or not _Path(image_path).exists():
+                raise FileNotFoundError(
+                    f"Missing image_path in RIFT CSV row={row_idx}: {image_path}\n"
+                    f"CSV: {csv_path}\n"
+                    "Fix: build a real CSV with scripts/build_rift_csv_from_cift_ffpp.py"
+                )
+
+            if strict and (not donor_path or not _Path(donor_path).exists()):
+                raise FileNotFoundError(
+                    f"Missing donor_path/source_ref_path in RIFT CSV row={row_idx}: {donor_path}\n"
+                    f"CSV: {csv_path}\n"
+                    "Strict identity-gap mode needs donor/reference images."
+                )
+
+            img = load_image_minus1_1(image_path, device=device)
+            donor = load_image_minus1_1(donor_path, device=device) if donor_path else None
+            gt = load_mask(mask_path, like=img) if mask_path and _Path(mask_path).exists() else None
+
             yield img, donor, gt
+
             count += 1
+
             if count >= cap:
                 break
 
@@ -294,24 +330,94 @@ def block1_contrasts(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def run_block2(cfg, adapter, explainers, device="cuda") -> Tuple[List[str], List[List[Any]]]:
-    """Execute the audit leaderboard over the configured explainers."""
+    """Execute the audit leaderboard over the configured explainers with tqdm progress."""
     from .audit_runner import audit_one, aggregate
     from .leaderboard import build_leaderboard
-    expose = cfg.get_dotted("ablation.spec") and None  # expose rule read from spec by caller
+
+    try:
+        from tqdm.auto import tqdm
+    except Exception:
+        tqdm = None
+
     agg_rows = []
+
+    total = cfg.get_dotted("dataset.max_items") or 200
+    try:
+        total = int(total)
+    except Exception:
+        total = 200
+
     for name in explainers:
         ex = make_explainer(name, adapter)
+
         if ex is None:
-            continue   # annotation/vlm handled via external maps; skip if not wired
+            print(f"  [skip] explainer not wired: {name}", flush=True)
+            continue
+
+        print(f"  [audit] explainer={name}", flush=True)
+
         per = []
-        for img, donor, gt in iter_audit_samples(cfg, device=device):
-            row, *_ = audit_one(img, adapter, ex,
-                                intervention_mode=cfg.get_dotted("intervention.mode", "blur"),
-                                topk_frac=cfg.get_dotted("intervention.topk_frac", 0.12),
-                                donor=donor, gt_mask=gt)
-            per.append(row)
+
+        try:
+            sample_iter = iter_audit_samples(cfg, device=device)
+
+            if tqdm is not None:
+                sample_iter = tqdm(
+                    sample_iter,
+                    total=total,
+                    desc=f"audit:{name}",
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+
+            for sample_idx, (img, donor, gt) in enumerate(sample_iter, start=1):
+                if tqdm is None:
+                    print(f"    [{name}] sample {sample_idx}/{total}", flush=True)
+
+                row, *_ = audit_one(
+                    img,
+                    adapter,
+                    ex,
+                    intervention_mode=cfg.get_dotted("intervention.mode", "blur"),
+                    topk_frac=cfg.get_dotted("intervention.topk_frac", 0.12),
+                    donor=donor,
+                    gt_mask=gt,
+                )
+
+                row["explainer"] = name
+                per.append(row)
+
+                if tqdm is not None:
+                    sample_iter.set_postfix(
+                        {
+                            "rows": len(per),
+                            "last_rift": f"{row.get('rift_score', 0.0):.3f}",
+                        }
+                    )
+
+        except KeyboardInterrupt:
+            print(f"\n[STOP] interrupted during explainer={name}", flush=True)
+            raise
+
+        except Exception as e:
+            print(f"  [WARN] explainer={name} failed: {type(e).__name__}: {e}", flush=True)
+            continue
+
         if per:
-            agg_rows.append(aggregate(per))
+            agg = aggregate(per)
+            agg["explainer"] = name
+            agg_rows.append(agg)
+
+            print(
+                f"  [done] explainer={name} "
+                f"n={len(per)} "
+                f"rift_score={agg.get('rift_score', 0.0):.4f}",
+                flush=True,
+            )
+
+    if not agg_rows:
+        print("  [WARN] no audit rows produced. Check CSV, CIFT checkpoint, and explainers.", flush=True)
+
     return build_leaderboard(agg_rows)
 
 

@@ -2,7 +2,7 @@ exp_name: rift_rl_full
 device: cuda
 seed: 42
 out_dir: outputs/rift_rl
-cift_ckpt: /scratch/sahil/.../cift_best.pth
+cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
 cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
 strict_identity_gap: false
 algo: reinforce        # reinforce | ppo

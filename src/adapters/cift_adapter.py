@@ -301,3 +301,149 @@ class CIFTAdapter:
             if feat.dim() > 2:
                 feat = feat.flatten(2).mean(-1)
             return feat.norm(dim=-1).mean().item()
+
+# =============================================================================
+# RIFT PATCH: gradient-enabled CIFT calls for audit explainers
+# =============================================================================
+# The original adapter intentionally runs CIFT under torch.no_grad() for normal
+# detection and identity-gap scoring. That is correct for evaluation, but Grad-CAM
+# and CIFT-gap attribution need gradients w.r.t. the input image.
+#
+# These monkey-patched methods keep normal predict_logits()/identity_gap() intact
+# and add gradient-safe paths used only by explainers.
+# =============================================================================
+
+def _rift_forward_grad(self, x, donor=None, forgery_type="swap"):
+    """
+    Gradient-enabled CIFT forward.
+
+    Returns:
+      logits: tensor with grad if CIFT graph exposes grad to input
+      gap:    tensor with grad if dual identity branch exposes grad to input
+
+    This is used by GradCAMExplainer and CIFTGapExplainer only.
+    """
+    if not _HAS_TORCH:
+        raise RuntimeError("gradient CIFT forward needs torch.")
+
+    if self.model is None:
+        raise RuntimeError("CIFT model not loaded. Call load_detector() first.")
+
+    x = x.to(self.device).float()
+
+    if not x.requires_grad:
+        x.requires_grad_(True)
+
+    if donor is not None:
+        donor = donor.to(self.device).float()
+
+    batch = self._build_batch(x, donor=donor, forgery_type=forgery_type)
+
+    with torch.enable_grad():
+        source, target, c, _ = self.model.get_input(batch, self.model.first_stage_key)
+        out = self.model(source, target, c, batch[self.keys["label_key"]])
+
+    loss_dict = (
+        out[1]
+        if isinstance(out, tuple) and len(out) > 1 and isinstance(out[1], dict)
+        else {}
+    )
+
+    if "v/logits" in loss_dict:
+        logits = loss_dict["v/logits"].float().view(-1)
+    elif "v/probs" in loss_dict:
+        p = loss_dict["v/probs"].float().clamp(1e-6, 1 - 1e-6).view(-1)
+        logits = torch.log(p / (1 - p))
+    else:
+        raise RuntimeError(f"No logits/probs in CIFT output. Keys: {list(loss_dict.keys())}")
+
+    gap = getattr(self.model.control_model, "_gap", None)
+
+    if gap is None:
+        gap = torch.zeros_like(logits)
+
+    gap = gap.float().view(-1)
+
+    return logits, gap
+
+
+def _rift_predict_logits_for_grad(self, x):
+    """Gradient-enabled deployed logit for logit-saliency/Grad-CAM fallback."""
+    logits, _ = self._forward_grad(x, donor=None)
+    return logits
+
+
+def _rift_explain_identity_gap(self, x, donor=None, source_id=None, target_id=None):
+    """
+    Gradient attribution for CIFT identity-gap.
+
+    Priority:
+      1. donor-grounded true gap gradient if donor is provided
+      2. deployed logit input-gradient fallback
+      3. deterministic image-energy fallback, so audit never crashes
+    """
+    if not _HAS_TORCH:
+        raise RuntimeError("explain_identity_gap needs torch.")
+
+    x = x.clone().detach().to(self.device).float().requires_grad_(True)
+
+    if donor is not None:
+        donor = donor.to(self.device).float()
+
+    # 1) True donor-grounded identity-gap gradient.
+    if donor is not None:
+        try:
+            _, gap = self._forward_grad(x, donor=donor)
+            score = gap.sum()
+
+            if getattr(score, "requires_grad", False):
+                grad = torch.autograd.grad(
+                    score,
+                    x,
+                    retain_graph=False,
+                    create_graph=False,
+                    allow_unused=True,
+                )[0]
+
+                if grad is not None:
+                    return grad.abs().mean(dim=1, keepdim=True).detach()
+        except Exception as e:
+            warnings.warn(
+                f"CIFT true-gap gradient failed; falling back to logit gradient. Error: {e}",
+                RuntimeWarning,
+            )
+
+    # 2) Deployed logit gradient fallback.
+    try:
+        logits = self._forward_grad(x, donor=None)[0]
+        score = logits.sum()
+
+        if getattr(score, "requires_grad", False):
+            grad = torch.autograd.grad(
+                score,
+                x,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )[0]
+
+            if grad is not None:
+                return grad.abs().mean(dim=1, keepdim=True).detach()
+    except Exception as e:
+        warnings.warn(
+            f"CIFT logit gradient failed; falling back to image-energy saliency. Error: {e}",
+            RuntimeWarning,
+        )
+
+    # 3) Last-resort deterministic fallback, normalized image energy.
+    sal = x.detach().abs().mean(dim=1, keepdim=True)
+    sal = sal - sal.amin(dim=(2, 3), keepdim=True)
+    sal = sal / (sal.amax(dim=(2, 3), keepdim=True) + 1e-8)
+    return sal
+
+
+# Attach patched methods to CIFTAdapter.
+CIFTAdapter._forward_grad = _rift_forward_grad
+CIFTAdapter.predict_logits_for_grad = _rift_predict_logits_for_grad
+CIFTAdapter.explain_identity_gap = _rift_explain_identity_gap
+

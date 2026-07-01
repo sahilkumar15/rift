@@ -1,191 +1,134 @@
-# ════════════════════════════════════════════════════════════════════════════════════
-# RIFT — Reinforced Identity-Gap Faithfulness Testing  (MASTER generalized config)
-# ════════════════════════════════════════════════════════════════════════════════════
-# RIFT audits whether a detector's explanation is the actual cause of CIFT's validated
-# donor-grounded identity gap Δ (necessity/sufficiency), exposes plausible-but-unfaithful
-# explanations, and tests whether faithfulness predicts cross-dataset generalization.
-#
-# This config extends the real CIFT dataset/model schema (same keys as IGANER's
-# train_general.yaml) so the SAME dataset roots and CIFT checkpoint work unchanged.
-# RIFT-specific blocks (audit / correlation / ablation / rl) are added at the bottom.
-#
-# RUN (always from the RIFT root):
-#   # Phase 0 gates (precondition — run first, single GPU, small slice):
-#   bash scripts/run_rift.sh --mode gates --csv data/slices/example_ffpp_forged.csv
-#   # Full ablation table (Blocks 1–4), all cells, 3 seeds:
-#   bash scripts/run_rift.sh --mode ablations --seeds 0,1,2
-#   # Just the decisive method cells (generic-logit vs Δ-grounded):
-#   bash scripts/run_rift.sh --mode ablations --block 1 --only generic_logit,delta_grounded
-#   # Dry-run: print the ✓/✗ cell plan without touching the model:
-#   bash scripts/run_rift.sh --mode ablations --dry-run
-# ════════════════════════════════════════════════════════════════════════════════════
-
 seed: 3407
 device: cuda
-torch_home: ""
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# DETECTOR UNDER AUDIT — CIFT (donor-grounded identity-gap detector)
-# RIFT does not train CIFT; it loads your trained CIFT checkpoint and audits it.
-# ════════════════════════════════════════════════════════════════════════════════════
+torch_home: ''
 detector:
   type: cift
-  backbone: "convnextv2_base"          # "convnextv2_large" for +capacity
-  cift_ckpt: null                      # ← SET THIS: path to your CIFT .ckpt under audit
-                                       #   e.g. experiments/CIFT_mix5_3/ckpt/cift-best-eer.ckpt
-  cift_config: "configs/diffusionfake_mixed.yaml"   # resolved under --cift-root
-  cift_root: null                      # ← SET or pass --cift-root: ImageDifussionFake repo root
-  strict_identity_gap: true            # true -> raise on missing donor (no silent proxy in audits)
-
-# For the Block-3 correlation across checkpoints, list the CIFT checkpoints to audit.
-# Each contributes one (faithfulness, in_domain_auc, plausibility, zero_shot_auc) row.
+  backbone: convnextv2_base
+  cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
+  cift_config: configs/diffusionfake_mixed.yaml
+  cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+  strict_identity_gap: true
 checkpoints:
-  glob: null                           # e.g. "experiments/CIFT_*/ckpt/*best*.ckpt"
-  explicit: []                         # or list paths explicitly: ["/path/a.ckpt", ...]
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# DATASETS — exactly the CIFT schema (same roots as your CIFT/IGANER configs).
-# RIFT needs the ANALYZED image + a CITED mask + a DONOR reference (retrieved same-id
-# frame is fine — that is how CIFT measures test-time Δ). Missing donor -> proxy mode.
-# ════════════════════════════════════════════════════════════════════════════════════
+  glob: null
+  explicit: []
 dataset:
-  name: "ffpp_rela"                    # in-domain audit set (paper protocol)
-  format: csv_split                    # RIFT split CSV (see data/slices/example_ffpp_forged.csv)
-  split_csv: null                      # ← optional explicit CSV; else built from the roots below
-  max_items: 200                       # audit slice size (keep small; numbers not speed)
-
-  # ── FF++ (in-domain) ───────────────────────────────────────────────────────────
+  name: ffpp_rela
+  format: csv_split
+  split_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
+  max_items: 200
   ffpp_rela:
-    data_root: "/scratch/sahil/projects/img_deepfake/datasets/ffpp"   # ← YOUR FF++ ROOT
-    compressions: "c23"
+    data_root: /scratch/sahil/projects/img_deepfake/datasets/ffpp
+    compressions: c23
     num_frames: 50
-    methods: ["youtube", "Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
-    relation_data: true                # CRITICAL: loads donor reference x_s for the Δ stream
+    methods:
+    - youtube
+    - Deepfakes
+    - Face2Face
+    - FaceSwap
+    - NeuralTextures
+    relation_data: true
     use_splits: true
-    splits_dirname: "splits"
-    csv_dirname: "split_csv2"
-
-  # ── Zero-shot benchmarks (for Block-3 cross-dataset generalization) ──────────────
+    splits_dirname: splits
+    csv_dirname: split_csv2
   zero_shot:
     celeb_df:
-      data_root: "/scratch/sahil/projects/img_deepfake/datasets/celebdf"        # ← YOUR CELEBDF ROOT
-      split_csv: "/scratch/sahil/projects/img_deepfake/datasets/celebdf/split_csv2/celeb_df_v2_test.csv"
+      data_root: /scratch/sahil/projects/img_deepfake/datasets/celebdf
+      split_csv: /scratch/sahil/projects/img_deepfake/datasets/celebdf/split_csv2/celeb_df_v2_test.csv
     dfd:
-      data_root: "/scratch/sahil/projects/img_deepfake/datasets/dfd"            # ← YOUR DFD ROOT
-      split_csv: "/scratch/sahil/projects/img_deepfake/datasets/dfd/split_csv2/dfd_test.csv"
+      data_root: /scratch/sahil/projects/img_deepfake/datasets/dfd
+      split_csv: /scratch/sahil/projects/img_deepfake/datasets/dfd/split_csv2/dfd_test.csv
     wild_deepfake:
-      data_root: "/scratch/sahil/projects/img_deepfake/datasets/wild_deepfake"  # ← YOUR WILDDEEPFAKE ROOT
-      split_csv: "/scratch/sahil/projects/img_deepfake/datasets/wild_deepfake/split_csv2/wilddeepfake_test.csv"
+      data_root: /scratch/sahil/projects/img_deepfake/datasets/wild_deepfake
+      split_csv: /scratch/sahil/projects/img_deepfake/datasets/wild_deepfake/split_csv2/wilddeepfake_test.csv
     diffswap:
-      data_root: "/scratch/sahil/projects/img_deepfake/datasets/diffswap"       # ← YOUR DIFFSWAP ROOT
-      split_csv: "/scratch/sahil/projects/img_deepfake/datasets/diffswap/split_csv2/diffswap_test.csv"
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# TRANSFORMS — exactly CIFT (images reach the adapter as BCHW float in [-1,1])
-# ════════════════════════════════════════════════════════════════════════════════════
+      data_root: /scratch/sahil/projects/img_deepfake/datasets/diffswap
+      split_csv: /scratch/sahil/projects/img_deepfake/datasets/diffswap/split_csv2/diffswap_test.csv
 transform:
   image_size: 256
-  mean: [0.5, 0.5, 0.5]
-  std:  [0.5, 0.5, 0.5]
-
+  mean:
+  - 0.5
+  - 0.5
+  - 0.5
+  std:
+  - 0.5
+  - 0.5
+  - 0.5
 data:
   num_workers: 4
   image_size: 256
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# INTERVENTION — necessity/sufficiency masking (the falsification operator)
-# ════════════════════════════════════════════════════════════════════════════════════
+  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
+  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela.csv
+  strict_identity_gap: true
 intervention:
-  mode: blur                           # blur | mean | zero  (how the cited region is destroyed)
-  topk_frac: 0.12                      # fraction of pixels kept as "the cited region"
-  random_control: true                 # also mask a random equal-area region (Gate-1 control)
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# FAITHFULNESS REWARD WEIGHTS — combine Δ + logit channels + constraints.
-# Proxy mode forces w_delta=0 in code (honesty guard); these are the defaults.
-# ════════════════════════════════════════════════════════════════════════════════════
+  mode: blur
+  topk_frac: 0.12
+  random_control: true
 faithfulness:
   weights:
-    w_delta:        1.0
-    w_logit:        0.5
-    w_sparsity:     0.3
-    w_identity:     0.3
-    w_perceptual:   0.2
+    w_delta: 1.0
+    w_logit: 0.5
+    w_sparsity: 0.3
+    w_identity: 0.3
+    w_perceptual: 0.2
     w_plausibility: 0.0
-  delta_floor: 0.0                     # genuine-frame Δ floor (CIFT: Δ≈0 for real)
+  delta_floor: 0.0
   logit_floor: 0.0
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# EXPLAINERS audited in Block 2 (the leaderboard). Each is scored on faithfulness vs
-# plausibility; the exposé is any explainer that is plausible but unfaithful.
-# ════════════════════════════════════════════════════════════════════════════════════
 explainers:
-  - random                             # floor
-  - gradcam_logit                      # detector-logit saliency (DeFacto-style source)
-  - cift_gap                           # CIFT's own Δ attribution (audited against itself)
-  - annotation                         # human annotation mask (MARE-style plausibility)
-  - vlm_external                       # optional VLM-cited region (needs vlm_adapter)
-  - rift_policy                        # the RL repair policy explainer
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# RL REPAIR POLICY — training-only; inference is plain CIFT. Block-4 tests whether this
-# is a real sequential policy (H>1 beats H=1) or a contextual bandit (then demote).
-# ════════════════════════════════════════════════════════════════════════════════════
+- random
+- gradcam_logit
+- cift_gap
+- annotation
+- vlm_external
+- rift_policy
 rl:
-  algo: ppo                            # ppo | reinforce
-  horizon: 4                           # H; Block-4 sweeps {1,2,4,8}
-  grid: 8                              # action grid (mask cells)
+  algo: ppo
+  horizon: 4
+  grid: 8
   hidden: 256
-  lr: 3.0e-5
+  lr: 3.0e-05
   clip: 0.2
   entropy_coef: 0.01
   value_coef: 0.5
   ppo_epochs: 4
   epochs: 30
-  protection: true                     # Δ-preservation term in reward (anti reward-hacking)
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# ABLATION SYSTEM — config-driven, multi-seed. The runner reads ablations_rift.yaml for
-# the per-block cell definitions (the ✓/✗ matrix). Toggle whole blocks here.
-# ════════════════════════════════════════════════════════════════════════════════════
+  protection: true
 ablation:
-  spec: configs/ablations_rift.yaml    # the cell definitions (✓/✗ permutations)
-  seeds: [0, 1, 2]                     # multi-seed; mean±std reported
+  spec: configs/ablations_rift.yaml
+  seeds:
+  - 0
+  - 1
+  - 2
   blocks:
-    block0_validity:    true           # Gate-1 separation per mask/op
-    block1_method:      true           # the main method factorial (I×G×P×K)
-    block2_audit:       true           # explainer leaderboard
-    block3_correlation: true           # faithfulness-vs-generalization (+ saturation control)
-    block4_rl:          true           # horizon sensitivity / is-it-a-bandit
-  min_sep: 0.15                        # Gate-1 pass threshold
-  headline_min_n: 15                   # Block-3: n<15 -> trend, not headline
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# OUTPUTS
-# ════════════════════════════════════════════════════════════════════════════════════
+    block0_validity: true
+    block1_method: true
+    block2_audit: true
+    block3_correlation: true
+    block4_rl: true
+  min_sep: 0.15
+  headline_min_n: 15
 output:
-  root: "experiments"
-  name: "RIFT_ffpp_audit"              # change per run
-  table_csv: "outputs/table_rift.csv"  # combined ablation table
-  per_cell_dir: "outputs/cells"        # one CSV/JSON per cell
-  leaderboard_csv: "outputs/leaderboard.csv"
-  correlation_json: "outputs/correlation.json"
-
-# ════════════════════════════════════════════════════════════════════════════════════
-# WEIGHTS & BIASES   (export WANDB_API_KEY=...  or  wandb login)
-# ════════════════════════════════════════════════════════════════════════════════════
+  root: experiments
+  name: RIFT_ffpp_audit
+  table_csv: outputs/table_rift.csv
+  per_cell_dir: outputs/cells
+  leaderboard_csv: outputs/leaderboard.csv
+  correlation_json: outputs/correlation.json
 wandb:
   enabled: true
-  project: "RIFT_ICLR"
-  entity: null                         # ← SET THIS: your W&B username
-  group: "rift_ablations_ffpp"
+  project: RIFT_ICLR
+  entity: null
+  group: rift_ablations_ffpp
   name: null
-  tags: ["rift", "faithfulness", "identity-gap", "audit", "convnextv2_base", "ffpp"]
-  mode: "online"                       # online | offline | disabled
+  tags:
+  - rift
+  - faithfulness
+  - identity-gap
+  - audit
+  - convnextv2_base
+  - ffpp
+  mode: online
   log_model: false
-
-# ── Resume + checkpoint (RL repair policy only; audit/correlation are stateless) ──
-resume: auto                           # auto | none | /path/to/policy.pth
+resume: auto
 checkpoint:
   dir: outputs/ckpt
   metric: faithfulness_delta

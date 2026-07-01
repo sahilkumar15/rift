@@ -1,13 +1,16 @@
-# Path: src/data/datamodule.py
-# Status: MODIFIED
 """Bundles dataset + loaders.
 
 For real CIFT/RIFT runs, pass data.train_csv and data.val_csv.
 
-If only one split CSV is available, the caller may intentionally use the same CSV
-for train/val for a smoke/debug run.
+Path handling:
+  If the CSV contains placeholder /data/ffpp paths, pass:
 
-Falls back to synthetic donor-free data only when train_csv is not supplied.
+    data.data_root=/actual/ffpp/root
+
+  or:
+
+    data.path_prefix_from=/data/ffpp
+    data.path_prefix_to=/actual/ffpp/root
 """
 from __future__ import annotations
 
@@ -40,18 +43,27 @@ def build_dataloaders(cfg):
     if not train_csv:
         return _synthetic_loaders(cfg)
 
+    common = dict(
+        image_loader=loader,
+        strict_identity_gap=strict,
+        data_root=cfg.get("data_root") or cfg.get("root_path") or cfg.get("root"),
+        path_prefix_from=cfg.get("path_prefix_from"),
+        path_prefix_to=cfg.get("path_prefix_to"),
+        path_rewrites=cfg.get("path_rewrites"),
+        check_files=cfg.get("check_files", True),
+        check_limit=cfg.get("check_limit", 0),
+    )
+
     train = FFPPDataset(
         train_csv,
-        image_loader=loader,
         transform=tf_train,
-        strict_identity_gap=strict,
+        **common,
     )
 
     val = FFPPDataset(
         val_csv,
-        image_loader=loader,
         transform=tf_eval,
-        strict_identity_gap=strict,
+        **common,
     )
 
     def coll(b):
