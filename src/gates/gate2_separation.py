@@ -95,7 +95,7 @@ def _faith_on_channel(adapter, img, mask, donor, channel, mode, topk):
     if channel == "delta":
         ev = lambda x: adapter.identity_gap(x, donor=donor).value
     else:
-        ev = lambda x: float(adapter.predict_logits(x).mean().item())
+        ev = lambda x: float(torch.sigmoid(adapter.predict_logits(x)).mean().item())
     e0 = ev(img)
     e_nec = ev(apply_necessity(img, mask, mode, topk))
     e_suf = ev(apply_sufficiency(img, mask, mode, topk))
@@ -155,7 +155,7 @@ def main():
         fg.append(_faith_on_channel(adapter, img, logit_mask, donor, "logit", args.mode, args.topk_frac))
 
         # (b) delta-grounded: explanation = delta attribution; faithfulness on delta channel
-        delta_mask = adapter.explain_identity_gap(img)
+        delta_mask = adapter.explain_identity_gap(img, donor=donor)
         fd.append(_faith_on_channel(adapter, img, delta_mask, donor, "delta", args.mode, args.topk_frac))
 
         # (c) MARE-style: explanation = annotation; plausibility = IoU(anno,anno)=1 by construction

@@ -200,7 +200,8 @@ def make_explainer(name: str, adapter=None):
         if not getattr(e, "name", None):
             e.name = name
         return e
-    # annotation / vlm_external are handled by the caller (need external maps); skip here.
+    # annotation is handled inside run_block2 because it needs gt_mask per sample.
+    # vlm_external needs external maps and is intentionally skipped unless wired.
     return None
 
 
@@ -385,7 +386,7 @@ def run_block2(cfg, adapter, explainers, device="cuda") -> Tuple[List[str], List
     for name in explainers:
         ex = make_explainer(name, adapter)
 
-        if ex is None:
+        if ex is None and name != "annotation":
             print(f"  [skip] explainer not wired: {name}", flush=True)
             continue
 
@@ -409,10 +410,18 @@ def run_block2(cfg, adapter, explainers, device="cuda") -> Tuple[List[str], List
                 if tqdm is None:
                     print(f"    [{name}] sample {sample_idx}/{total}", flush=True)
 
+                if name == "annotation":
+                    if gt is None:
+                        continue
+                    from ..explainers.annotation_explainer import AnnotationExplainer
+                    ex_this = AnnotationExplainer(gt)
+                else:
+                    ex_this = ex
+
                 row, *_ = audit_one(
                     img,
                     adapter,
-                    ex,
+                    ex_this,
                     intervention_mode=cfg.get_dotted("intervention.mode", "blur"),
                     topk_frac=cfg.get_dotted("intervention.topk_frac", 0.12),
                     donor=donor,

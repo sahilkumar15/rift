@@ -52,7 +52,18 @@ class BatchedRIFTEnv:
         self.n_actions = self.n_cells + 1
         self.stop_action = self.n_cells
 
-        self._reset_state()
+        # Do NOT call _reset_state() here.
+        # _reset_state() runs expensive frozen CIFT forwards.
+        # The training loop calls env.reset() immediately after construction.
+        # Calling it here would double the CIFT cost per batch.
+        self.step_idx = 0
+        self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
+        self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
+        self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
+        self.e0_gap = torch.zeros(self.B, device=self.image.device)
+        self.e0_logit = torch.zeros(self.B, device=self.image.device)
+        self.identity_gap_mode = "unknown"
+        self.feat0 = None
 
     def _reset_state(self):
         self.step_idx = 0
@@ -69,7 +80,7 @@ class BatchedRIFTEnv:
             self.e0_gap = _fix_vec(self.e0_gap, self.B, self.image.device)
 
             logit = self.adapter.predict_logits(self.image)
-            self.e0_logit = _fix_vec(logit, self.B, self.image.device)
+            self.e0_logit = torch.sigmoid(_fix_vec(logit, self.B, self.image.device))
 
             self.feat0 = None
             if self.cache_features:
@@ -79,7 +90,18 @@ class BatchedRIFTEnv:
                     self.feat0 = None
 
     def reset(self):
-        self._reset_state()
+        # Do NOT call _reset_state() here.
+        # _reset_state() runs expensive frozen CIFT forwards.
+        # The training loop calls env.reset() immediately after construction.
+        # Calling it here would double the CIFT cost per batch.
+        self.step_idx = 0
+        self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
+        self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
+        self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
+        self.e0_gap = torch.zeros(self.B, device=self.image.device)
+        self.e0_logit = torch.zeros(self.B, device=self.image.device)
+        self.identity_gap_mode = "unknown"
+        self.feat0 = None
         return self._state()
 
     def current_mask(self):
@@ -146,8 +168,8 @@ class BatchedRIFTEnv:
             gap_nec = _fix_vec(gap_nec, self.B, self.image.device)
             gap_suf = _fix_vec(gap_suf, self.B, self.image.device)
 
-            l_nec = _fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device)
-            l_suf = _fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device)
+            l_nec = torch.sigmoid(_fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device))
+            l_suf = torch.sigmoid(_fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device))
 
         area = _mask_area_per_sample(pm, self.topk_frac)
 

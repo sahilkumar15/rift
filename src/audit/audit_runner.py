@@ -40,7 +40,7 @@ def audit_one(
             source_id=source_id,
             target_id=target_id,
         )
-        l0 = float(adapter.predict_logits(image).mean().item())
+        l0 = float(torch.sigmoid(adapter.predict_logits(image)).mean().item())
 
         nec = apply_necessity(image, mask, intervention_mode, topk_frac)
         suf = apply_sufficiency(image, mask, intervention_mode, topk_frac)
@@ -58,8 +58,8 @@ def audit_one(
             target_id=target_id,
         )
 
-        ln = float(adapter.predict_logits(nec).mean().item())
-        ls = float(adapter.predict_logits(suf).mean().item())
+        ln = float(torch.sigmoid(adapter.predict_logits(nec)).mean().item())
+        ls = float(torch.sigmoid(adapter.predict_logits(suf)).mean().item())
 
     comp = compute_rift_score(
         e0_delta=g0.value,
