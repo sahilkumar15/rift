@@ -150,14 +150,6 @@ ablation:
   min_sep: 0.15
   headline_min_n: 15
 
-output:
-  root: experiments
-  name: RIFT_ffpp_c23
-  table_csv: outputs/table_rift.csv
-  per_cell_dir: outputs/cells
-  leaderboard_csv: outputs/leaderboard.csv
-  correlation_json: outputs/correlation.json
-
 wandb:
   enabled: false
   project: RIFT_ICLR
@@ -190,3 +182,82 @@ checkpoint:
 
 amp:
   enabled: false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EARLY STOPPING
+# ═══════════════════════════════════════════════════════════════════════════════
+early_stopping:
+  monitor:   "val/rift_score"
+  mode:      "max"
+  patience:  8
+  min_delta: 0.002
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHECKPOINTING
+# ═══════════════════════════════════════════════════════════════════════════════
+checkpoint:
+  # If dir is null, code uses: experiments/<experiment.name>/ckpt
+  dir: null
+  monitor:          "val/rift_score"
+  mode:             "max"
+  save_top_k:       3
+  save_last:        true
+  best_filename:    "rift-best-score-epoch={epoch:02d}"
+  every_filename:   "rift-epoch={epoch:02d}"
+  save_every:       1
+  save_epochs:      []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPERIMENT
+# This controls:
+#   1. experiments/<experiment.name>/
+#   2. experiments/<experiment.name>/ckpt/
+#   3. W&B run name when wandb.name is null
+# ═══════════════════════════════════════════════════════════════════════════════
+experiment:
+  root_dir: "experiments"
+  name: "RIFT_ffpp_c23_h4_full"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARTIFACTS / TABLES
+# Null means the code saves under experiments/<experiment.name>/.
+# ═══════════════════════════════════════════════════════════════════════════════
+artifacts:
+  table_csv: null
+  per_cell_dir: null
+  leaderboard_csv: null
+  correlation_json: null
+  correlation_input: null
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEIGHTS & BIASES
+# ═══════════════════════════════════════════════════════════════════════════════
+wandb:
+  enabled: true
+  project:   "RIFT_ICLR27"
+  entity:    null
+  group:     "rift_ffpp_c23_full"
+  name:      null
+  tags:
+    - "rift"
+    - "faithfulness"
+    - "identity-gap"
+    - "rl-policy"
+    - "cift-frozen"
+    - "convnextv2_base"
+    - "ffpp"
+    - "c23"
+    - "horizon4"
+  notes: >
+    RIFT trains an explanation-repair RL policy on top of a frozen CIFT detector.
+    The goal is to audit and reinforce whether explanations are faithful to the
+    donor-recipient identity-gap evidence. Active data: FF++ c23 relation split.
+    Frozen detector: CIFT Mix5 checkpoint. RIFT policy is used for audit/repair;
+    the CIFT detector graph itself is not changed.
+  save_code: true
+  log_model: false
+  mode:      "online"
+
+# auto resumes from experiments/<experiment.name>/ckpt/latest.pth if present.
+# none starts fresh. A concrete .pth path resumes from that file.
+resume: auto

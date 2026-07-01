@@ -89,6 +89,31 @@ def _write_table(path, rows):
             w.writerow(_format_row(r, ndigits=4))
 
 
+
+def _artifact_path(cfg, key, default):
+    explicit = cfg.get_dotted(f"artifacts.{key}")
+    if explicit:
+        return explicit
+
+    legacy = cfg.get_dotted(f"output.{key}")
+    if legacy:
+        return legacy
+
+    root = cfg.get_dotted("experiment.root_dir", "experiments")
+    name = cfg.get_dotted("experiment.name", "RIFT_rl")
+    exp_dir = os.path.join(root, name)
+
+    defaults = {
+        "per_cell_dir": os.path.join(exp_dir, "cells"),
+        "table_csv": os.path.join(exp_dir, "table_rift.csv"),
+        "leaderboard_csv": os.path.join(exp_dir, "leaderboard.csv"),
+        "correlation_json": os.path.join(exp_dir, "correlation.json"),
+        "correlation_input": None,
+    }
+
+    return defaults.get(key, default)
+
+
 def main():
     ap = argparse.ArgumentParser(description="RIFT ablation runner")
     ap.add_argument("-c", "--config", default="configs/rift_general.yaml")
@@ -162,7 +187,7 @@ def main():
         config_path=cfg.get_dotted("detector.cift_config", "configs/diffusionfake_mixed.yaml"),
     ).load_detector()
 
-    out_dir = cfg.get_dotted("output.per_cell_dir", "outputs/cells")
+    out_dir = _artifact_path(cfg, "per_cell_dir", "experiments/RIFT_rl/cells")
     os.makedirs(out_dir, exist_ok=True)
     table_rows = []
 
@@ -193,7 +218,7 @@ def main():
                     d["exposed"] = exposed
                     d["block"] = blk
                     table_rows.append(d)
-                _write_table(cfg.get_dotted("output.leaderboard_csv", "outputs/leaderboard.csv"),
+                _write_table(_artifact_path(cfg, "leaderboard_csv", "experiments/RIFT_rl/leaderboard.csv"),
                              [r for r in table_rows if r.get("block") == blk])
 
             elif blk == "block3_correlation":
@@ -203,7 +228,7 @@ def main():
                           "output.correlation_input or checkpoints.*; see README.")
                 else:
                     res = run_block3(rows, spec.get("block3_correlation", {}))
-                    with open(cfg.get_dotted("output.correlation_json", "outputs/correlation.json"), "w") as f:
+                    with open(_artifact_path(cfg, "correlation_json", "experiments/RIFT_rl/correlation.json"), "w") as f:
                         json.dump(res, f, indent=2, default=str)
                     print("  correlation written.")
 
@@ -222,7 +247,7 @@ def main():
         except Exception as e:  # robust: one block failing never kills the others
             print(f"  [ERROR in {blk}] {type(e).__name__}: {e}", file=sys.stderr)
 
-    table_path = cfg.get_dotted("output.table_csv", "outputs/table_rift.csv")
+    table_path = _artifact_path(cfg, "table_csv", "experiments/RIFT_rl/table_rift.csv")
     _write_table(table_path, table_rows)
     print(f"\n[ablate_rift] combined table -> {table_path}  ({len(table_rows)} rows)")
     return 0
@@ -230,7 +255,7 @@ def main():
 
 def _load_checkpoint_rows(cfg):
     """Block-3 input: a CSV with faithfulness,in_domain_auc,plausibility,zero_shot_auc."""
-    path = cfg.get_dotted("output.correlation_input")
+    path = _artifact_path(cfg, "correlation_input", None)
     if not path or not os.path.exists(path):
         return []
     rows = []

@@ -1,26 +1,31 @@
 # Path: src/utils/checkpoint_manager.py
-"""Top-k + latest + interval checkpointing with resume.
+"""Top-k + latest/last + selected-epoch checkpointing with robust resume.
 
-Fixes:
-  1. PyTorch >=2.6 torch.load defaults to weights_only=True.
-     Old RIFT checkpoints include src.utils.config.Config, so auto-resume can fail.
-  2. Future checkpoints are sanitized into plain Python containers before saving.
+Supports CIFT-style YAML keys:
+  checkpoint.monitor
+  checkpoint.mode
+  checkpoint.save_top_k
+  checkpoint.save_last
+  checkpoint.best_filename
+  checkpoint.every_filename
+  checkpoint.save_epochs
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, Iterable, List, Optional
 
 try:
     import torch
+
     _HAS_TORCH = True
 except Exception:
     _HAS_TORCH = False
 
 
 def _to_plain(obj: Any):
-    """Recursively convert Config/dict/list objects into safe Python containers."""
     if obj is None:
         return None
 
@@ -33,14 +38,12 @@ def _to_plain(obj: Any):
     if isinstance(obj, (list, tuple)):
         return [_to_plain(v) for v in obj]
 
-    # Config in this project behaves like dict but may not subclass dict safely.
     if hasattr(obj, "items"):
         try:
             return {str(k): _to_plain(v) for k, v in obj.items()}
         except Exception:
             pass
 
-    # Keep torch tensors/modules/state_dict items as-is.
     if _HAS_TORCH and torch.is_tensor(obj):
         return obj
 
@@ -48,16 +51,48 @@ def _to_plain(obj: Any):
 
 
 def _safe_state(state: Dict):
-    """Sanitize checkpoint state before torch.save."""
-    clean = {}
+    return {str(k): _to_plain(v) for k, v in state.items()}
 
-    for k, v in state.items():
-        if k == "config":
-            clean[k] = _to_plain(v)
-        else:
-            clean[k] = _to_plain(v)
 
-    return clean
+def _safe_metric_name(name: str) -> str:
+    name = str(name or "metric")
+    name = name.replace("/", "_")
+    return re.sub(r"[^A-Za-z0-9_.=-]+", "_", name)
+
+
+def _format_filename(template: str, *, epoch: int, monitor: str, score: Optional[float]) -> str:
+    metric_name = _safe_metric_name(monitor)
+
+    kwargs = {
+        "epoch": epoch,
+        "monitor": metric_name,
+        "score": float(score) if score is not None else 0.0,
+    }
+
+    try:
+        name = str(template).format(**kwargs)
+    except Exception:
+        name = f"rift-epoch={epoch:02d}"
+
+    if not os.path.splitext(name)[1]:
+        name += ".pth"
+
+    return name
+
+
+def _parse_epochs(save_epochs: Optional[Iterable]) -> set[int]:
+    if not save_epochs:
+        return set()
+
+    out = set()
+
+    for e in save_epochs:
+        try:
+            out.add(int(e))
+        except Exception:
+            pass
+
+    return out
 
 
 class CheckpointManager:
@@ -67,53 +102,92 @@ class CheckpointManager:
         monitor="val/rift_score",
         mode="max",
         top_k=3,
-        interval=10,
+        interval=1,
+        save_last=True,
+        best_filename="rift-best-score-epoch={epoch:02d}",
+        every_filename="rift-epoch={epoch:02d}",
+        save_epochs=None,
     ):
-        self.out_dir = out_dir
-        os.makedirs(out_dir, exist_ok=True)
+        self.out_dir = str(out_dir)
+        os.makedirs(self.out_dir, exist_ok=True)
 
-        self.monitor = monitor
-        self.mode = mode
-        self.top_k = top_k
-        self.interval = interval
+        self.monitor = str(monitor or "val/rift_score")
+        self.mode = str(mode or "max").lower()
+        self.top_k = int(top_k if top_k is not None else 3)
+        self.interval = int(interval if interval is not None else 1)
+        self.save_last = bool(save_last)
+        self.best_filename = best_filename or "rift-best-score-epoch={epoch:02d}"
+        self.every_filename = every_filename or "rift-epoch={epoch:02d}"
+        self.save_epochs = _parse_epochs(save_epochs)
         self.best: List = []
 
-    def _better(self, a, b):
-        return a > b if self.mode == "max" else a < b
+    def _should_save_interval(self, epoch_num: int) -> bool:
+        if epoch_num in self.save_epochs:
+            return True
+
+        return bool(self.interval and epoch_num % self.interval == 0)
 
     def save(self, state: Dict, epoch: int, metrics: Dict):
         if not _HAS_TORCH:
             raise RuntimeError("torch needed to save ckpt.")
 
         state = _safe_state(state)
+        epoch_num = int(epoch) + 1
+        paths = {}
 
-        latest = os.path.join(self.out_dir, "latest.pth")
-        torch.save(state, latest)
+        if self.save_last:
+            latest = os.path.join(self.out_dir, "latest.pth")
+            last = os.path.join(self.out_dir, "last.pth")
+            torch.save(state, latest)
+            torch.save(state, last)
+            paths["latest"] = latest
+            paths["last"] = last
 
-        paths = {"latest": latest}
-
-        if self.interval and epoch % self.interval == 0:
-            p = os.path.join(self.out_dir, f"epoch_{epoch:04d}.pth")
+        if self._should_save_interval(epoch_num):
+            filename = _format_filename(
+                self.every_filename,
+                epoch=epoch_num,
+                monitor=self.monitor,
+                score=None,
+            )
+            p = os.path.join(self.out_dir, filename)
             torch.save(state, p)
             paths["interval"] = p
 
         score = metrics.get(self.monitor)
 
-        if score is not None:
-            p = os.path.join(self.out_dir, f"best_e{epoch:04d}_{score:.4f}.pth")
+        if score is None and "/" in self.monitor:
+            score = metrics.get(self.monitor.split("/", 1)[-1])
+
+        if score is not None and self.top_k != 0:
+            score = float(score)
+
+            filename = _format_filename(
+                self.best_filename,
+                epoch=epoch_num,
+                monitor=self.monitor,
+                score=score,
+            )
+
+            p = os.path.join(self.out_dir, filename)
             torch.save(state, p)
+
+            if self.top_k < 0:
+                paths["best"] = p
+                return paths
 
             self.best.append((score, p))
             self.best.sort(key=lambda x: x[0], reverse=(self.mode == "max"))
 
-            for _, old in self.best[self.top_k:]:
+            for _, old in self.best[self.top_k :]:
                 if os.path.exists(old):
                     os.remove(old)
 
             self.best = self.best[: self.top_k]
 
-            paths["best"] = self.best[0][1]
-            paths["top_k"] = [p for _, p in self.best]
+            if self.best:
+                paths["best"] = self.best[0][1]
+                paths["top_k"] = [p for _, p in self.best]
 
         return paths
 
@@ -122,20 +196,19 @@ class CheckpointManager:
             return None
 
         if mode == "auto":
-            latest = os.path.join(self.out_dir, "latest.pth")
-            return latest if os.path.exists(latest) else None
+            for name in ("latest.pth", "last.pth"):
+                path = os.path.join(self.out_dir, name)
+                if os.path.exists(path):
+                    return path
+            return None
 
-        return mode if os.path.exists(mode) else None
+        return mode if os.path.exists(str(mode)) else None
 
     def load(self, path):
         if not _HAS_TORCH:
             raise RuntimeError("torch needed.")
 
-        # PyTorch 2.6 changed torch.load default to weights_only=True.
-        # RIFT checkpoints are created locally by this training script and may
-        # contain Config metadata, so we explicitly allow full load.
         try:
             return torch.load(path, map_location="cpu", weights_only=False)
         except TypeError:
-            # Older PyTorch versions do not have weights_only.
             return torch.load(path, map_location="cpu")

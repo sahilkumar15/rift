@@ -49,7 +49,7 @@ VAL_CSV=""
 GPUS="0,1,2,3"
 EPOCHS="20"
 BATCH="64"
-NUM_WORKERS=""
+NUM_WORKERS="4"
 WANDB=""
 MODE="gates"
 BLOCK=""
@@ -156,7 +156,8 @@ YAML_EPOCHS="$(yaml_get rl.epochs)"
 YAML_BATCH="$(yaml_get data.batch_size)"
 YAML_WORKERS="$(yaml_get data.num_workers)"
 YAML_WANDB="$(yaml_get wandb.enabled)"
-YAML_OUTPUT_NAME="$(yaml_get output.name)"
+YAML_EXPERIMENT_ROOT="$(yaml_get experiment.root_dir)"
+YAML_EXPERIMENT_NAME="$(yaml_get experiment.name)"
 YAML_CIFT_ROOT="$(yaml_get detector.cift_root)"
 YAML_CKPT="$(yaml_get detector.cift_ckpt)"
 YAML_AUDIT_CSV="$(yaml_get dataset.split_csv)"
@@ -198,7 +199,11 @@ fi
 
 [[ $MISSING -eq 1 ]] && { echo "Fix paths above, then re-run."; exit 1; }
 
-mkdir -p "${RIFT_ROOT}/outputs/cells" "${RIFT_ROOT}/outputs/logs" "${RIFT_ROOT}/outputs/ckpt"
+EXPERIMENT_ROOT="${YAML_EXPERIMENT_ROOT:-experiments}"
+EXPERIMENT_NAME="${YAML_EXPERIMENT_NAME:-RIFT}"
+EXPERIMENT_DIR="$(abs_path "${EXPERIMENT_ROOT}/${EXPERIMENT_NAME}")"
+
+mkdir -p "${EXPERIMENT_DIR}/logs" "${EXPERIMENT_DIR}/ckpt"
 cd "$RIFT_ROOT"
 
 export PYTHONPATH="${RIFT_PKG}:${CIFT_ROOT}:${PYTHONPATH:-}"
@@ -211,6 +216,17 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 
 COMMON_OV=("device=cuda")
+
+# Use YAML experiment.name as the deterministic W&B display name.
+# This prevents W&B names like rift_ddp_h4_seed3407.
+if ! has_extra_prefix "wandb.name="; then
+  COMMON_OV+=("wandb.name=${EXPERIMENT_NAME}")
+fi
+
+# Keep legacy exp_name aligned too, because the train code may use exp_name fallback.
+if ! has_extra_prefix "exp_name="; then
+  COMMON_OV+=("exp_name=${EXPERIMENT_NAME}")
+fi
 
 [[ -n "$WANDB" ]] && COMMON_OV+=("wandb.enabled=${WANDB}")
 [[ -n "$CKPT" ]] && COMMON_OV+=("detector.cift_ckpt=${CKPT}")
@@ -227,6 +243,7 @@ echo "════════════════════════�
 echo " RIFT  ·  mode=$MODE  block=${BLOCK:-all}  only=${ONLY:-all}"
 echo " root      : $RIFT_ROOT"
 echo " config    : $CONFIG"
+echo " experiment: ${EXPERIMENT_ROOT}/${EXPERIMENT_NAME}"
 echo " cift-root : ${CIFT_ROOT:-<from yaml>}"
 echo " ckpt      : ${CKPT:-<from yaml>}"
 echo " csv       : ${CSV:-<from yaml>}"
@@ -277,18 +294,18 @@ stable_ckpt_dir() {
     return
   fi
 
-  local base="${YAML_CKPT_DIR:-outputs/ckpt}"
-  local name="${YAML_OUTPUT_NAME:-RIFT}"
+  local root="${YAML_EXPERIMENT_ROOT:-experiments}"
+  local name="${YAML_EXPERIMENT_NAME:-RIFT}"
+  local base="${YAML_CKPT_DIR:-${root}/${name}/ckpt}"
 
   base="$(abs_path "$base")"
 
-  # If YAML checkpoint.dir is just outputs/ckpt, create stable run folder.
-  # If YAML checkpoint.dir is already a specific folder, use it directly.
-  if [[ "$(basename "$base")" == "ckpt" ]]; then
-    echo "${base}/${name}_${run_kind}_h${horizon}_seed${seed}"
-  else
-    echo "$base"
-  fi
+  # CIFT-style default:
+  #   experiments/<experiment.name>/ckpt
+  #
+  # No ddp/single/seed suffix here, because experiment.name already identifies
+  # the run in YAML and W&B.
+  echo "$base"
 }
 
 run_single_train() {
@@ -337,7 +354,7 @@ run_ddp_train() {
   local ckpt_dir
   ckpt_dir="$(stable_ckpt_dir ddp "$seed" "$h_label")"
 
-  local logroot="${RIFT_ROOT}/outputs/logs/train_ddp_h${h_label}_seed${seed}_e${e_label}_$(date +%Y%m%d_%H%M%S)"
+  local logroot="${EXPERIMENT_DIR}/logs/train_ddp_h${h_label}_seed${seed}_e${e_label}_$(date +%Y%m%d_%H%M%S)"
   local log="${logroot}/train_ddp.log"
 
   mkdir -p "$logroot"
@@ -374,8 +391,6 @@ run_ddp_train() {
       "${TRAIN_OV[@]}" \
       "${CKPT_OV[@]}" \
       seed="$seed" \
-      wandb.name="rift_ddp_h${h_label}_seed${seed}" \
-      output.name="rift_ddp_h${h_label}_seed${seed}" \
       2>&1 | tee "$log"
 }
 
@@ -478,6 +493,6 @@ esac
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"
-echo " DONE ($MODE). Outputs under ${RIFT_ROOT}/outputs/"
-[[ -f "${RIFT_ROOT}/outputs/table_rift.csv" ]] && echo " table : outputs/table_rift.csv"
+echo " DONE ($MODE). Outputs under ${EXPERIMENT_DIR#$RIFT_ROOT/}/"
+[[ -f "${EXPERIMENT_DIR}/table_rift.csv" ]] && echo " table : ${EXPERIMENT_DIR#$RIFT_ROOT/}/table_rift.csv"
 echo "═══════════════════════════════════════════════════════════"
