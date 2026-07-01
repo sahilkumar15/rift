@@ -461,6 +461,26 @@ def train(cfg, adapter, dataloaders):
     es_best = None
     es_bad_epochs = 0
 
+    # Rank-0 only:
+    #   epoch_pbar = overall training progress
+    #   pbar       = current epoch batch progress
+    if _is_main():
+        try:
+            from tqdm import tqdm
+
+            epoch_pbar = tqdm(
+                total=epochs,
+                initial=start_epoch,
+                desc="overall training",
+                dynamic_ncols=True,
+                leave=True,
+                position=0,
+            )
+        except Exception:
+            epoch_pbar = None
+    else:
+        epoch_pbar = None
+
     for epoch in range(start_epoch, epochs):
         _set_sampler_epoch(train_dl, epoch)
         policy.train()
@@ -473,7 +493,8 @@ def train(cfg, adapter, dataloaders):
                     total=len(train_dl),
                     desc=f"train epoch {epoch + 1}/{epochs}",
                     dynamic_ncols=True,
-                    leave=True,
+                    leave=False,
+                    position=1,
                 )
             except Exception:
                 pbar = None
@@ -616,6 +637,16 @@ def train(cfg, adapter, dataloaders):
 
         _ddp_barrier()
 
+        if epoch_pbar is not None:
+            epoch_pbar.set_postfix(
+                {
+                    "epoch": f"{epoch + 1}/{epochs}",
+                    "rift": f"{metrics.get('rift_score', 0.0):.4f}",
+                    "reward": f"{local_reward_sum / max(local_items, 1):.4f}",
+                }
+            )
+            epoch_pbar.update(1)
+
         if should_stop:
             if _is_main():
                 stop_msg = (
@@ -625,6 +656,9 @@ def train(cfg, adapter, dataloaders):
                 log.info(stop_msg)
                 print(stop_msg)
             break
+
+    if epoch_pbar is not None:
+        epoch_pbar.close()
 
     if _is_main() and wb is not None:
         wb.finish()

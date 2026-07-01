@@ -1,16 +1,37 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # RIFT — Reinforced Identity-Gap Faithfulness Testing
 #
-# Default train command:
-#   bash scripts/run_rift.sh --gpus 0,1,2,3 --mode train --horizon 4
-#
 # CIFT is frozen. RIFT trains only the explanation-repair RL policy.
+#
+# Default train command:
+#   bash scripts/run_rift.sh --mode train --gpus 4,5,6,7
 # ═══════════════════════════════════════════════════════════════════════════════
 
 seed: 3407
 device: cuda
 torch_home: ""
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPERIMENT
+#
+# IMPORTANT:
+#   Change the run name ONLY here:
+#     experiment.name: &run_name "RIFT_ffpp_c23_h4_full"
+#
+#   W&B name automatically uses:
+#     wandb.name: *run_name
+#
+#   So experiment folder and W&B display name stay identical.
+# ═══════════════════════════════════════════════════════════════════════════════
+experiment:
+  root_dir: &experiment_root "experiments"
+  name: &run_name "RIFT_ffpp_h4_full_2"
+  group: &run_group "rift_ffpp_c23_full"
+  project: &wandb_project "RIFT_ICLR27"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DETECTOR
+# ═══════════════════════════════════════════════════════════════════════════════
 detector:
   type: cift
   backbone: convnextv2_base
@@ -19,10 +40,14 @@ detector:
   cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
   strict_identity_gap: true
 
+# For checkpoint-level audits/correlation blocks.
 checkpoints:
   glob: null
   explicit: []
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATASET
+# ═══════════════════════════════════════════════════════════════════════════════
 dataset:
   name: ffpp_rela
   format: csv_split
@@ -67,37 +92,50 @@ dataset:
       data_root: /scratch/sahil/projects/img_deepfake/datasets/diffswap
       split_csv: /scratch/sahil/projects/img_deepfake/datasets/diffswap/split_csv2/diffswap_test.csv
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRANSFORM
+# ═══════════════════════════════════════════════════════════════════════════════
 transform:
   image_size: 256
   mean: [0.5, 0.5, 0.5]
   std:  [0.5, 0.5, 0.5]
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# RL TRAIN / VAL DATA
+# ═══════════════════════════════════════════════════════════════════════════════
 data:
   image_size: 256
 
-  # Main RL train/val CSVs.
-  # The launcher uses these automatically unless --csv / --val-csv is passed.
   train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
   val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
 
   strict_identity_gap: true
 
-  # Per-GPU batch. With 4 GPUs, global batch = 16 * 4 = 64.
+  # Per-GPU batch size.
+  # With 4 GPUs:
+  #   batch_size: 64  => global batch 256
+  #   batch_size: 16  => global batch 64
   batch_size: 64
   num_workers: 4
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
 
-  # Controlled training subset. Set null for full CSV.
+  # null = full CSV.
   max_items: null
   val_max_items: null
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERVENTION
+# ═══════════════════════════════════════════════════════════════════════════════
 intervention:
   mode: blur
   topk_frac: 0.12
   random_control: true
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FAITHFULNESS SCORE
+# ═══════════════════════════════════════════════════════════════════════════════
 faithfulness:
   weights:
     w_delta: 1.0
@@ -109,12 +147,19 @@ faithfulness:
   delta_floor: 0.0
   logit_floor: 0.0
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPLAINERS FOR AUDIT BLOCKS
+# ═══════════════════════════════════════════════════════════════════════════════
 explainers:
   - random
   - gradcam_logit
   - cift_gap
+  - annotation
   - rift_policy
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# RL POLICY
+# ═══════════════════════════════════════════════════════════════════════════════
 rl:
   algo: ppo
   horizon: 4
@@ -127,7 +172,6 @@ rl:
   entropy_coef: 0.01
   value_coef: 0.5
 
-  # Keep 1 for speed with CIFT-heavy training.
   ppo_epochs: 5
   epochs: 30
 
@@ -138,6 +182,9 @@ rl:
   reward_preset: full_rift
   cache_features: true
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ABLATION / PAPER BLOCKS
+# ═══════════════════════════════════════════════════════════════════════════════
 ablation:
   spec: configs/ablations_rift.yaml
   seeds: [0, 1, 2]
@@ -150,53 +197,16 @@ ablation:
   min_sep: 0.15
   headline_min_n: 15
 
-wandb:
-  enabled: false
-  project: RIFT_ICLR
-  entity: null
-  group: rift_ffpp_c23
-  name: null
-  tags:
-    - rift
-    - faithfulness
-    - identity-gap
-    - audit
-    - convnextv2_base
-    - ffpp
-    - c23
-  mode: online
-  log_model: false
-
-# auto resumes from latest.pth if present.
-# none starts fresh.
-resume: auto
-
-checkpoint:
-  # Base folder. run_rift.sh will create a stable per-run folder:
-  # outputs/ckpt/RIFT_ffpp_c23_ddp_h4_seed3407
-  dir: outputs/ckpt
-  metric: rift_score
-  mode: max
-  save_every: 1
-  top_k: 3
-
-amp:
-  enabled: false
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# EARLY STOPPING
-# ═══════════════════════════════════════════════════════════════════════════════
-early_stopping:
-  monitor:   "val/rift_score"
-  mode:      "max"
-  patience:  8
-  min_delta: 0.002
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # CHECKPOINTING
+#
+# Uses:
+#   experiments/<experiment.name>/ckpt/
+#
+# Because:
+#   checkpoint.dir: null
 # ═══════════════════════════════════════════════════════════════════════════════
 checkpoint:
-  # If dir is null, code uses: experiments/<experiment.name>/ckpt
   dir: null
   monitor:          "val/rift_score"
   mode:             "max"
@@ -208,19 +218,19 @@ checkpoint:
   save_epochs:      []
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# EXPERIMENT
-# This controls:
-#   1. experiments/<experiment.name>/
-#   2. experiments/<experiment.name>/ckpt/
-#   3. W&B run name when wandb.name is null
+# EARLY STOPPING
 # ═══════════════════════════════════════════════════════════════════════════════
-experiment:
-  root_dir: "experiments"
-  name: "RIFT_ffpp_c23_h4_full"
+early_stopping:
+  monitor:   "val/rift_score"
+  mode:      "max"
+  patience:  8
+  min_delta: 0.002
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARTIFACTS / TABLES
-# Null means the code saves under experiments/<experiment.name>/.
+#
+# null means:
+#   experiments/<experiment.name>/
 # ═══════════════════════════════════════════════════════════════════════════════
 artifacts:
   table_csv: null
@@ -231,23 +241,29 @@ artifacts:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WEIGHTS & BIASES
+#
+# IMPORTANT:
+#   wandb.name uses the same YAML anchor as experiment.name:
+#     name: *run_name
+#
+# So change experiment.name once, and W&B name changes automatically.
 # ═══════════════════════════════════════════════════════════════════════════════
 wandb:
   enabled: true
-  project:   "RIFT_ICLR27"
-  entity:    null
-  group:     "rift_ffpp_c23_full"
-  name:      null
+  project: *wandb_project
+  entity: null
+  group: *run_group
+  name: *run_name
   tags:
-    - "rift"
-    - "faithfulness"
-    - "identity-gap"
-    - "rl-policy"
-    - "cift-frozen"
-    - "convnextv2_base"
-    - "ffpp"
-    - "c23"
-    - "horizon4"
+    - rift
+    - faithfulness
+    - identity-gap
+    - rl-policy
+    - cift-frozen
+    - convnextv2_base
+    - ffpp
+    - c23
+    - horizon4
   notes: >
     RIFT trains an explanation-repair RL policy on top of a frozen CIFT detector.
     The goal is to audit and reinforce whether explanations are faithful to the
@@ -256,15 +272,16 @@ wandb:
     the CIFT detector graph itself is not changed.
   save_code: true
   log_model: false
-  mode:      "online"
+  mode: online
 
 # auto resumes from experiments/<experiment.name>/ckpt/latest.pth if present.
 # none starts fresh. A concrete .pth path resumes from that file.
 resume: auto
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# RIFT SPEED DEFAULTS
-# ═══════════════════════════════════════════════════════════════════════════════
-# Training now uses BatchedRIFTEnv. Keep validation bounded because validation
-# also runs necessity/sufficiency interventions through frozen CIFT.
+amp:
+  enabled: false
+
+# Training now uses BatchedRIFTEnv.
+# Keep validation bounded because validation also runs necessity/sufficiency
+# interventions through frozen CIFT.
 train_log_every: 10

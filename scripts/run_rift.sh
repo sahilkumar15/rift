@@ -47,8 +47,8 @@ VAL_CSV=""
 # CLI can override using --epochs, --batch, --workers, --seeds, etc.
 # ─────────────────────────────────────────────────────────────────────────────
 GPUS="0,1,2,3"
-EPOCHS="20"
-BATCH="64"
+EPOCHS="50"
+BATCH="256"
 NUM_WORKERS="4"
 WANDB=""
 MODE="gates"
