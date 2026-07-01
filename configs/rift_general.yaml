@@ -261,3 +261,10 @@ wandb:
 # auto resumes from experiments/<experiment.name>/ckpt/latest.pth if present.
 # none starts fresh. A concrete .pth path resumes from that file.
 resume: auto
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RIFT SPEED DEFAULTS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Training now uses BatchedRIFTEnv. Keep validation bounded because validation
+# also runs necessity/sufficiency interventions through frozen CIFT.
+train_log_every: 10

@@ -9,6 +9,9 @@ outputs/
 backup_pathfix_20260701_012620/
 data/slices/
 *bak*
+experiments/
+
+
 # C extensions
 *.so
 

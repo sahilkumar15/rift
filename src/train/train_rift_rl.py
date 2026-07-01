@@ -1,13 +1,9 @@
 # Path: src/train/train_rift_rl.py
-"""RIFT-RL training loop with robust DDP resume.
+"""Fast RIFT-RL training loop.
 
-This version fixes:
-  - DDP resume across all ranks.
-  - Stable resume from latest.pth.
-  - Optimizer state restore.
-  - PPO lambda restore.
-  - Validation frequency control.
-  - Checkpoint saving with optimizer/algo state.
+Main speed fix:
+  Old path: for each batch, loop over every item and create one RIFTEnv per image.
+  New path: create one BatchedRIFTEnv per mini-batch and update PPO once per batch.
 """
 
 from __future__ import annotations
@@ -23,8 +19,8 @@ from ..rl.policy import GridPolicy
 from ..rl.ppo import PPO
 from ..rl.reinforce import Reinforce
 from ..rl.reward import get_reward_weights
-from ..rl.rift_env import RIFTEnv
-from ..rl.rollout_buffer import RolloutBuffer
+from ..rl.batched_rift_env import BatchedRIFTEnv
+from ..rl.batched_rollout_buffer import BatchedRolloutBuffer
 
 log = get_logger("train")
 
@@ -117,20 +113,79 @@ def _move_optimizer_state_to_device(algo, device):
                 state[k] = v.to(device)
 
 
-def _device_item(item, key, device):
-    x = item.get(key)
-
-    if x is None:
-        return None
-
-    return x.unsqueeze(0).to(device, non_blocking=True)
-
-
 def _set_sampler_epoch(dl, epoch):
     sampler = getattr(dl, "sampler", None)
 
     if hasattr(sampler, "set_epoch"):
         sampler.set_epoch(epoch)
+
+
+def _as_bool(v, default=False):
+    if v is None:
+        return default
+
+    if isinstance(v, bool):
+        return v
+
+    s = str(v).strip().lower()
+
+    if s in ("1", "true", "yes", "on"):
+        return True
+
+    if s in ("0", "false", "no", "off", "none", "null", "disabled", ""):
+        return False
+
+    return default
+
+
+def _metric_value(metrics, monitor):
+    key = str(monitor or "rift_score")
+
+    if key in metrics:
+        return metrics[key]
+
+    if "/" in key:
+        short = key.split("/", 1)[-1]
+        if short in metrics:
+            return metrics[short]
+
+    return None
+
+
+def _is_better(value, best, mode, min_delta=0.0):
+    if value is None:
+        return False
+
+    if best is None:
+        return True
+
+    value = float(value)
+    best = float(best)
+    min_delta = float(min_delta or 0.0)
+
+    if str(mode).lower() == "min":
+        return value < best - min_delta
+
+    return value > best + min_delta
+
+
+def _stack_tensor(xs, device):
+    import torch
+
+    return torch.stack([x for x in xs], dim=0).to(device, non_blocking=True)
+
+
+def _batch_to_device(batch, device):
+    """Convert DataLoader list[dict] into batched BCHW tensors."""
+    images = _stack_tensor([item["image"] for item in batch], device)
+
+    donor_values = [item.get("donor") for item in batch]
+    has_all_donors = all(d is not None for d in donor_values)
+    donor = _stack_tensor(donor_values, device) if has_all_donors else None
+
+    samples = [item.get("sample") for item in batch]
+
+    return images, donor, samples
 
 
 def _reduce_metrics(metrics):
@@ -202,10 +257,67 @@ def _make_algo(cfg, policy):
     )
 
 
+def _make_env(images, donor, adapter, cfg, weights, grid, horizon):
+    return BatchedRIFTEnv(
+        images,
+        adapter,
+        grid=grid,
+        horizon=horizon,
+        intervention_mode=cfg.get("intervention_mode", "blur"),
+        topk_frac=cfg.get("topk_frac", 0.12),
+        reward_fn=weights,
+        donor=donor,
+        cache_features=_as_bool(cfg.get("cache_features", True), default=True),
+    )
+
+
+def _collect_batched_rollout(policy, env, *, deterministic=False):
+    import torch
+
+    buf = BatchedRolloutBuffer()
+    state = env.reset()
+    info = {}
+
+    for _ in range(env.horizon):
+        logits, value = policy(state)
+        logp_all = torch.log_softmax(logits, dim=-1)
+
+        if deterministic:
+            actions = logits.argmax(dim=-1)
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            actions = torch.multinomial(probs, 1).squeeze(1)
+
+        logp = logp_all.gather(1, actions.unsqueeze(1)).squeeze(1)
+        next_state, reward, done, info = env.step(actions)
+
+        buf.add(
+            state,
+            actions,
+            logp,
+            reward,
+            value.squeeze(-1),
+            done,
+        )
+
+        state = next_state
+
+        if bool(done.all().item()):
+            break
+
+    return buf, info
+
+
 def train(cfg, adapter, dataloaders):
     import torch
 
     ddp = _ddp_setup()
+
+    try:
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
     seed_everything(int(cfg.get("seed", 42)) + _rank())
 
@@ -225,7 +337,7 @@ def train(cfg, adapter, dataloaders):
         print(
             f"[train] device={device} algo={cfg.get('algo', 'ppo')} "
             f"epochs={cfg.get('epochs', 50)} horizon={cfg.get('horizon', 4)} "
-            f"grid={cfg.get('grid', 8)}"
+            f"grid={cfg.get('grid', 8)} mode=batched"
         )
 
     if id_mode == "proxy" and getattr(adapter, "strict_identity_gap", False):
@@ -257,26 +369,31 @@ def train(cfg, adapter, dataloaders):
 
     if _is_main():
         ckpt = CheckpointManager(
-            cfg.get("out_dir", "outputs/rift_rl"),
-            monitor=cfg.get("monitor", "rift_score"),
+            cfg.get("out_dir", "experiments/RIFT_rl/ckpt"),
+            monitor=cfg.get("monitor", "val/rift_score"),
             mode=cfg.get("mode", "max"),
             top_k=cfg.get("top_k", 3),
-            interval=cfg.get("interval", 10),
+            interval=cfg.get("interval", 1),
+            save_last=cfg.get("save_last", True),
+            best_filename=cfg.get("best_filename", "rift-best-score-epoch={epoch:02d}"),
+            every_filename=cfg.get("every_filename", "rift-epoch={epoch:02d}"),
+            save_epochs=cfg.get("save_epochs", []),
         )
 
         wb = WandbLogger(
-            cfg.get("wandb_project"),
-            cfg.get("exp_name"),
-            cfg,
+            project=cfg.get("wandb_project"),
+            name=cfg.get("wandb_name") or cfg.get("exp_name"),
+            config=cfg,
             enabled=cfg.get("wandb", False),
+            entity=cfg.get("wandb_entity"),
+            group=cfg.get("wandb_group"),
+            tags=cfg.get("wandb_tags", []),
+            notes=cfg.get("wandb_notes"),
+            mode=cfg.get("wandb_mode", "online"),
+            save_code=cfg.get("wandb_save_code", False),
+            log_model=cfg.get("wandb_log_model", False),
         )
 
-    # ---------------------------------------------------------------------
-    # Robust resume:
-    #   - rank 0 resolves latest.pth / explicit path
-    #   - path is broadcast to all ranks
-    #   - every rank loads same policy and optimizer state
-    # ---------------------------------------------------------------------
     resume_path = None
 
     if _is_main() and ckpt is not None:
@@ -327,7 +444,6 @@ def train(cfg, adapter, dataloaders):
         start_epoch = int(obj[0])
         gstep = int(obj[1])
 
-        # Safety sync.
         for param in _base_policy(policy).parameters():
             dist.broadcast(param.data, src=0)
 
@@ -335,6 +451,15 @@ def train(cfg, adapter, dataloaders):
 
     epochs = int(cfg.get("epochs", 50))
     val_every = int(cfg.get("val_every", 1) or 1)
+    log_every = int(cfg.get("train_log_every", 10) or 10)
+
+    es_monitor = cfg.get("early_stopping_monitor", cfg.get("monitor", "val/rift_score"))
+    es_mode = cfg.get("early_stopping_mode", cfg.get("mode", "max"))
+    es_patience = cfg.get("early_stopping_patience", None)
+    es_min_delta = float(cfg.get("early_stopping_min_delta", 0.0) or 0.0)
+    es_enabled = es_patience is not None and int(es_patience) > 0
+    es_best = None
+    es_bad_epochs = 0
 
     for epoch in range(start_epoch, epochs):
         _set_sampler_epoch(train_dl, epoch)
@@ -359,65 +484,30 @@ def train(cfg, adapter, dataloaders):
         local_reward_sum = 0.0
 
         for batch_idx, batch in enumerate(train_dl):
-            # Current stable path keeps per-item RIFTEnv behavior.
-            # DDP still shards data across GPUs. For max speed, use batched env patch separately.
-            for item in batch:
-                img = _device_item(item, "image", device)
-                donor = _device_item(item, "donor", device)
-                s = item.get("sample")
+            images, donor, _samples = _batch_to_device(batch, device)
+            B = int(images.shape[0])
 
-                env = RIFTEnv(
-                    img,
-                    adapter,
-                    grid=grid,
-                    horizon=horizon,
-                    intervention_mode=cfg.get("intervention_mode", "blur"),
-                    topk_frac=cfg.get("topk_frac", 0.12),
-                    reward_fn=weights,
-                    donor=donor,
-                    source_id=getattr(s, "source_id", None) if s else None,
-                    target_id=getattr(s, "target_id", None) if s else None,
+            env = _make_env(images, donor, adapter, cfg, weights, grid, horizon)
+            buf, info = _collect_batched_rollout(policy, env, deterministic=False)
+
+            logs = algo.update(buf)
+            gstep += 1
+
+            batch_reward = buf.total_reward_mean()
+            local_items += B
+            local_reward_sum += batch_reward * B
+
+            if _is_main() and wb is not None and (gstep % log_every == 0):
+                wb.log(
+                    {f"train/{k}": v for k, v in logs.items()}
+                    | {
+                        "train/reward_total": batch_reward,
+                        "train/batch_size": B,
+                        "epoch": epoch,
+                        "rank0/local_items": local_items,
+                    },
+                    step=gstep,
                 )
-
-                buf = RolloutBuffer()
-                state = env.reset()
-                done = False
-
-                while not done:
-                    logits, value = policy(state)
-                    probs = torch.softmax(logits, -1)
-
-                    a = int(torch.multinomial(probs, 1)[0, 0].item())
-                    logp = float(torch.log_softmax(logits, -1)[0, a].detach().item())
-
-                    nstate, r, done, _info = env.step(a)
-
-                    buf.add(
-                        state,
-                        a,
-                        logp,
-                        r,
-                        float(value.detach().item()),
-                        done,
-                    )
-
-                    state = nstate
-
-                logs = algo.update(buf)
-                gstep += 1
-                local_items += 1
-                local_reward_sum += float(sum(buf.rewards))
-
-                if _is_main() and wb is not None:
-                    wb.log(
-                        {f"train/{k}": v for k, v in logs.items()}
-                        | {
-                            "train/reward_total": sum(buf.rewards),
-                            "epoch": epoch,
-                            "rank0/local_items": local_items,
-                        },
-                        step=gstep,
-                    )
 
             if pbar is not None:
                 pbar.set_postfix(
@@ -452,12 +542,21 @@ def train(cfg, adapter, dataloaders):
 
         metrics["epoch_string"] = f"Epoch {epoch + 1}/{epochs}"
 
+        should_stop = False
+
         if _is_main():
             if wb is not None and do_val:
                 wb.log(
                     {f"val/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))},
                     step=gstep,
                 )
+
+            monitor_key = cfg.get("monitor", "val/rift_score")
+            monitor_value = _metric_value(metrics, monitor_key)
+
+            save_metrics = dict(metrics)
+            if monitor_value is not None:
+                save_metrics[monitor_key] = monitor_value
 
             paths = ckpt.save(
                 {
@@ -470,16 +569,33 @@ def train(cfg, adapter, dataloaders):
                     "rng": get_rng_states(),
                 },
                 epoch,
-                {cfg.get("monitor", "rift_score"): metrics.get("rift_score", 0.0)},
+                save_metrics,
             )
 
+            if do_val and es_enabled:
+                es_value = _metric_value(metrics, es_monitor)
+
+                if _is_better(es_value, es_best, es_mode, es_min_delta):
+                    es_best = float(es_value)
+                    es_bad_epochs = 0
+                else:
+                    es_bad_epochs += 1
+
+                if es_bad_epochs >= int(es_patience):
+                    should_stop = True
+
             if do_val:
+                es_txt = ""
+                if es_enabled:
+                    es_txt = f" early_stop={es_bad_epochs}/{int(es_patience)} best={es_best}"
+
                 msg = (
                     f"[val] {metrics['epoch_string']} "
                     f"rift_score={metrics.get('rift_score'):.4f} "
                     f"faith_delta={metrics.get('faithfulness_ns_delta'):.4f} "
                     f"n={metrics.get('n', 0)} "
                     f"ckpt={paths.get('best')}"
+                    f"{es_txt}"
                 )
             else:
                 msg = (
@@ -491,7 +607,24 @@ def train(cfg, adapter, dataloaders):
             log.info(msg)
             print(msg)
 
+        if _is_ddp():
+            import torch.distributed as dist
+
+            obj = [bool(should_stop)]
+            dist.broadcast_object_list(obj, src=0)
+            should_stop = bool(obj[0])
+
         _ddp_barrier()
+
+        if should_stop:
+            if _is_main():
+                stop_msg = (
+                    f"[early_stop] monitor={es_monitor} mode={es_mode} "
+                    f"patience={int(es_patience)} min_delta={es_min_delta} epoch={epoch + 1}"
+                )
+                log.info(stop_msg)
+                print(stop_msg)
+            break
 
     if _is_main() and wb is not None:
         wb.finish()
@@ -504,11 +637,6 @@ def train(cfg, adapter, dataloaders):
 def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
     import torch
 
-    from ..audit.audit_runner import aggregate, audit_one
-    from ..explainers.rift_policy_explainer import RIFTPolicyExplainer
-
-    rows = []
-
     if _is_ddp():
         device = f"cuda:{_local_rank()}"
     else:
@@ -516,22 +644,15 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
 
     max_batches = int(cfg.get("val_max_batches", 0) or 0)
 
-    expl = RIFTPolicyExplainer(
-        policy,
-        lambda img, ad, **kw: RIFTEnv(
-            img,
-            ad,
-            grid=grid,
-            horizon=horizon,
-            intervention_mode=cfg.get("intervention_mode", "blur"),
-            topk_frac=cfg.get("topk_frac", 0.12),
-            reward_fn=weights,
-            donor=kw.get("donor"),
-            source_id=kw.get("source_id"),
-            target_id=kw.get("target_id"),
-        ),
-        horizon,
-    )
+    sums = {
+        "rift_score": 0.0,
+        "faithfulness_ns_delta": 0.0,
+        "faithfulness_ns_logit": 0.0,
+        "necessity_delta_drop": 0.0,
+        "sufficiency_delta_retained": 0.0,
+        "mask_area": 0.0,
+    }
+    n = 0
 
     policy.eval()
 
@@ -540,33 +661,31 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
             if max_batches > 0 and bidx >= max_batches:
                 break
 
-            for item in batch:
-                img = _device_item(item, "image", device)
-                donor = _device_item(item, "donor", device)
-                s = item.get("sample")
+            images, donor, _samples = _batch_to_device(batch, device)
+            B = int(images.shape[0])
 
-                row, _, _, _ = audit_one(
-                    img,
-                    adapter,
-                    expl,
-                    intervention_mode=cfg.get("intervention_mode", "blur"),
-                    topk_frac=cfg.get("topk_frac", 0.12),
-                    donor=donor,
-                    source_id=getattr(s, "source_id", None) if s else None,
-                    target_id=getattr(s, "target_id", None) if s else None,
-                    reward_weights=weights,
-                )
+            env = _make_env(images, donor, adapter, cfg, weights, grid, horizon)
+            buf, info = _collect_batched_rollout(policy, env, deterministic=True)
 
-                rows.append(row)
+            reward = buf.rewards_tensor(device=device).sum(dim=0)
 
-    agg = aggregate(rows)
+            vals = {
+                "rift_score": float(reward.mean().item()),
+                "faithfulness_ns_delta": float(info.get("faithfulness_delta", 0.0)),
+                "faithfulness_ns_logit": float(info.get("faithfulness_logit", 0.0)),
+                "necessity_delta_drop": float(info.get("necessity_delta", 0.0)),
+                "sufficiency_delta_retained": float(info.get("sufficiency_delta", 0.0)),
+                "mask_area": float(info.get("mask_area", 0.0)),
+            }
+
+            for k, v in vals.items():
+                sums[k] += v * B
+
+            n += B
+
+    denom = max(1, n)
 
     return {
-        "n": agg.get("n", 0),
-        "rift_score": agg.get("rift_score", 0.0),
-        "faithfulness_ns_delta": agg.get("faithfulness_delta", 0.0),
-        "faithfulness_ns_logit": agg.get("faithfulness_logit", 0.0),
-        "necessity_delta_drop": agg.get("necessity_delta", 0.0),
-        "sufficiency_delta_retained": agg.get("sufficiency_delta", 0.0),
-        "mask_area": agg.get("mask_area", 0.0),
+        "n": n,
+        **{k: v / denom for k, v in sums.items()},
     }
