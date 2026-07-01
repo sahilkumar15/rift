@@ -281,11 +281,23 @@ def _compute_rift_score_tensor(
 
     nec_d = _nec(e0_delta, e_nec_delta)
     suf_d = _suf(e0_delta, e_suf_delta)
-    faith_d = _harmonic(nec_d, suf_d)
 
     nec_l = _nec(e0_logit, e_nec_logit)
     suf_l = _suf(e0_logit, e_suf_logit)
-    faith_l = _harmonic(nec_l, suf_l)
+
+    objective = str(w.get("objective", "harmonic")).lower()
+    if objective in ("necessity", "necessity_only", "nec"):
+        faith_d = nec_d
+        faith_l = nec_l
+    elif objective in ("sufficiency", "sufficiency_only", "suf"):
+        faith_d = suf_d
+        faith_l = suf_l
+    elif objective in ("none", "off"):
+        faith_d = torch.zeros_like(nec_d)
+        faith_l = torch.zeros_like(nec_l)
+    else:
+        faith_d = _harmonic(nec_d, suf_d)
+        faith_l = _harmonic(nec_l, suf_l)
 
     w_delta = float(w["w_delta"]) if str(identity_gap_mode) == "true" else 0.0
 
