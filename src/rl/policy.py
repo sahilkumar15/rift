@@ -1,26 +1,12 @@
 # Path: src/rl/policy.py
-"""Grid policy network for RIFT.
-
-DDP-safe version:
-  - No nn.LazyLinear
-  - No uninitialized parameters
-  - Works with torchrun + DistributedDataParallel
-  - Handles CIFT feature tensors robustly
-
-State expected from RIFTEnv:
-  state["feat"]         : optional tensor [B,C,H,W] or [B,C] or [C,H,W]
-  state["current_mask"] : tensor [B,1,G,G] or [B,G,G] or [G,G]
-  state["confidence"]   : scalar/tensor
-  state["step_idx"]     : scalar
-  state["last_action"]  : scalar
-"""
+"""Grid policy network for RIFT. Fast-DDP-safe batched version."""
 
 from __future__ import annotations
 
 try:
     import torch
     import torch.nn as nn
-
+    import torch.nn.functional as F
     _HAS_TORCH = True
 except Exception:
     _HAS_TORCH = False
@@ -43,7 +29,7 @@ if _HAS_TORCH:
                 nn.ReLU(inplace=True),
             )
 
-            self.scalar_dim = self.hidden // 4
+            self.scalar_dim = max(16, self.hidden // 4)
 
             self.scalar_enc = nn.Sequential(
                 nn.Linear(3, self.scalar_dim),
@@ -85,8 +71,7 @@ if _HAS_TORCH:
                 return x
 
             if x.shape[0] == 1:
-                reps = [batch_size] + [1] * (x.dim() - 1)
-                return x.repeat(*reps)
+                return x.repeat(*([batch_size] + [1] * (x.dim() - 1)))
 
             if x.shape[0] > batch_size:
                 return x[:batch_size]
@@ -105,77 +90,54 @@ if _HAS_TORCH:
             m = m.float()
 
             if m.shape[-2:] != (self.grid, self.grid):
-                m = torch.nn.functional.interpolate(
-                    m,
-                    size=(self.grid, self.grid),
-                    mode="nearest",
-                )
+                m = F.interpolate(m, size=(self.grid, self.grid), mode="nearest")
 
             return self.mask_enc(m)
 
-        def _scalar_to_float(self, x):
+        def _scalar_vec(self, x, batch_size, device):
             if torch.is_tensor(x):
-                if x.numel() == 0:
-                    return 0.0
-                return float(x.detach().flatten()[0].item())
+                t = x.detach().to(device=device, dtype=torch.float32).view(-1)
+            else:
+                try:
+                    t = torch.tensor([float(x)], device=device, dtype=torch.float32)
+                except Exception:
+                    t = torch.zeros(1, device=device, dtype=torch.float32)
 
-            try:
-                return float(x)
-            except Exception:
-                return 0.0
+            if t.numel() == batch_size:
+                return t
+
+            if t.numel() == 1:
+                return t.repeat(batch_size)
+
+            if t.numel() > batch_size:
+                return t[:batch_size]
+
+            reps = batch_size // t.numel() + 1
+            return t.repeat(reps)[:batch_size]
 
         def _encode_scalars(self, state, batch_size, device):
-            confidence = self._scalar_to_float(state.get("confidence", 0.0))
-            step_idx = self._scalar_to_float(state.get("step_idx", 0.0))
-            last_action = self._scalar_to_float(state.get("last_action", 0.0))
+            confidence = self._scalar_vec(state.get("confidence", 0.0), batch_size, device)
+            step_idx = self._scalar_vec(state.get("step_idx", 0.0), batch_size, device)
+            last_action = self._scalar_vec(state.get("last_action", -1.0), batch_size, device)
 
-            sc = torch.tensor(
-                [[confidence, step_idx, last_action]],
-                device=device,
-                dtype=torch.float32,
-            )
-
-            sc = sc.repeat(batch_size, 1)
+            sc = torch.stack([confidence, step_idx, last_action], dim=1)
 
             return self.scalar_enc(sc)
 
         def _prepare_feat_vector(self, feat, batch_size, device):
-            if feat is None:
-                return torch.zeros(
-                    batch_size,
-                    self.feat_dim,
-                    device=device,
-                    dtype=torch.float32,
-                )
-
-            if not torch.is_tensor(feat):
-                return torch.zeros(
-                    batch_size,
-                    self.feat_dim,
-                    device=device,
-                    dtype=torch.float32,
-                )
+            if feat is None or not torch.is_tensor(feat):
+                return torch.zeros(batch_size, self.feat_dim, device=device, dtype=torch.float32)
 
             feat = feat.to(device=device, dtype=torch.float32)
 
-            # Possible shapes:
-            #   [C,H,W]      -> [1,C,H,W]
-            #   [B,C,H,W]    -> pool -> [B,C]
-            #   [B,C]        -> keep
-            #   [B,C,L]      -> mean over L -> [B,C]
-            #   [C]          -> [1,C]
             if feat.dim() == 1:
                 feat = feat.unsqueeze(0)
 
             elif feat.dim() == 3:
-                # If looks like [C,H,W], add batch.
                 if feat.shape[0] != batch_size:
                     feat = feat.unsqueeze(0)
-
-                if feat.dim() == 4:
                     feat = self.feat_pool(feat).flatten(1)
                 else:
-                    # [B,C,L] -> [B,C]
                     feat = feat.mean(dim=-1)
 
             elif feat.dim() == 4:
@@ -186,8 +148,7 @@ if _HAS_TORCH:
 
             feat = self._match_batch(feat, batch_size)
 
-            # Pad/truncate to configured feat_dim.
-            c = feat.shape[1]
+            c = int(feat.shape[1])
 
             if c < self.feat_dim:
                 pad = torch.zeros(
@@ -204,8 +165,7 @@ if _HAS_TORCH:
             return feat
 
         def _encode_feat(self, state, batch_size, device):
-            feat = state.get("feat", None)
-            feat_vec = self._prepare_feat_vector(feat, batch_size, device)
+            feat_vec = self._prepare_feat_vector(state.get("feat"), batch_size, device)
             return self.feat_enc(feat_vec)
 
         def _encode(self, state):
@@ -215,23 +175,15 @@ if _HAS_TORCH:
             batch_size = self._batch_size(state)
             device = state["current_mask"].device
 
-            mask_h = self._encode_mask(state)
-            mask_h = self._match_batch(mask_h, batch_size)
-
+            mask_h = self._match_batch(self._encode_mask(state), batch_size)
             feat_h = self._encode_feat(state, batch_size, device)
-
             scalar_h = self._encode_scalars(state, batch_size, device)
 
-            h = torch.cat([feat_h, mask_h, scalar_h], dim=-1)
-
-            return self.trunk(h)
+            return self.trunk(torch.cat([feat_h, mask_h, scalar_h], dim=-1))
 
         def forward(self, state):
             h = self._encode(state)
-            logits = self.pi(h)
-            value = self.v(h)
-
-            return logits, value
+            return self.pi(h), self.v(h)
 
         @torch.no_grad()
         def act(self, state, deterministic=False):
@@ -241,7 +193,6 @@ if _HAS_TORCH:
                 return int(logits.argmax(dim=-1)[0].item())
 
             probs = torch.softmax(logits, dim=-1)
-
             return int(torch.multinomial(probs, 1)[0, 0].item())
 
 

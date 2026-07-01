@@ -481,3 +481,66 @@ CIFTAdapter._forward_grad = _rift_forward_grad
 CIFTAdapter.predict_logits_for_grad = _rift_predict_logits_for_grad
 CIFTAdapter.explain_identity_gap = _rift_explain_identity_gap
 
+
+# =============================================================================
+# RIFT FAST-DDP PATCH: per-sample identity-gap vector for batched PPO
+# =============================================================================
+def _rift_identity_gap_tensor(self, x, donor=None, source_id=None, target_id=None):
+    """Return (gap[B], mode) without collapsing the batch to one scalar."""
+
+    if not _HAS_TORCH:
+        raise RuntimeError("identity_gap_tensor needs torch.")
+
+    x = x.to(self.device).float()
+    B = int(x.shape[0])
+
+    has_donor = donor is not None or (source_id is not None and target_id is not None)
+    mode = resolve_mode(has_donor, self.strict_identity_gap)
+
+    if mode == IdentityGapMode.ERROR:
+        raise MechanismValidityError(
+            "strict_identity_gap=True but no donor tensor was passed. "
+            "Fast batched RIFT requires donor_path/source_ref_path in every row."
+        )
+
+    if mode == IdentityGapMode.TRUE:
+        if donor is None:
+            raise MechanismValidityError(
+                "TRUE identity-gap mode needs donor tensor, not only metadata IDs."
+            )
+
+        donor = donor.to(self.device).float()
+
+        _, gap = self._forward(x, donor=donor)
+        gap = gap.detach().float().view(-1)
+
+        if gap.numel() == 1 and B > 1:
+            gap = gap.repeat(B)
+        elif gap.numel() > B:
+            gap = gap[:B].contiguous()
+
+        return gap, IdentityGapMode.TRUE.value
+
+    if not self._proxy_warned:
+        warnings.warn(
+            "CIFTAdapter using PROXY identity-gap tensor (no donor stream).",
+            RuntimeWarning,
+        )
+        self._proxy_warned = True
+
+    feat = self.extract_features(x) if self.model is not None else x
+
+    if feat.dim() > 2:
+        feat = feat.flatten(2).mean(-1)
+
+    gap = feat.detach().float().norm(dim=-1).view(-1)
+
+    if gap.numel() == 1 and B > 1:
+        gap = gap.repeat(B)
+    elif gap.numel() > B:
+        gap = gap[:B].contiguous()
+
+    return gap, IdentityGapMode.PROXY.value
+
+
+CIFTAdapter.identity_gap_tensor = _rift_identity_gap_tensor

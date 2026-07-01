@@ -1,50 +1,36 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # RIFT — Reinforced Identity-Gap Faithfulness Testing
 #
-# This config follows the CIFT training protocol:
-#   FF++ relation data, c23 compression, donor/reference stream enabled.
+# Default train command:
+#   bash scripts/run_rift.sh --gpus 0,1,2,3 --mode train --horizon 4
 #
-# RIFT is not training CIFT. CIFT is frozen.
-# RIFT trains only the explanation-repair RL policy.
+# CIFT is frozen. RIFT trains only the explanation-repair RL policy.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 seed: 3407
 device: cuda
 torch_home: ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Frozen detector: CIFT
-# ─────────────────────────────────────────────────────────────────────────────
 detector:
   type: cift
   backbone: convnextv2_base
   cift_root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
   cift_config: configs/diffusionfake_mixed.yaml
   cift_ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
-
-  # Keep true for real RIFT. This forces donor-grounded identity-gap mode.
   strict_identity_gap: true
 
 checkpoints:
   glob: null
   explicit: []
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dataset
-# Important:
-#   RIFT uses explicit CSVs with image_path + donor_path.
-#   Build them using scripts/build_rift_csv_from_cift_ffpp.py.
-# ─────────────────────────────────────────────────────────────────────────────
 dataset:
   name: ffpp_rela
   format: csv_split
 
-  # Default audit CSV. Can be overridden with --csv.
+  # Default audit/gates CSV.
   split_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_rela_c23.csv
 
-  # null means use all rows in the CSV.
-  # Override from CLI for smoke/debug:
-  #   dataset.max_items=200
+  # null = use all rows for audit/gates.
   max_items: null
 
   ffpp_rela:
@@ -86,20 +72,26 @@ transform:
   mean: [0.5, 0.5, 0.5]
   std:  [0.5, 0.5, 0.5]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DataLoader config for RL training
-# ─────────────────────────────────────────────────────────────────────────────
 data:
-  num_workers: 4
   image_size: 256
 
-  # Default train/val. Override from CLI if needed.
-  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23.csv
-  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23.csv
+  # Main RL train/val CSVs.
+  # The launcher uses these automatically unless --csv / --val-csv is passed.
+  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
+  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
 
   strict_identity_gap: true
-  batch_size: 8
+
+  # Per-GPU batch. With 4 GPUs, global batch = 16 * 4 = 64.
+  batch_size: 64
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+  # Controlled training subset. Set null for full CSV.
   max_items: null
+  val_max_items: null
 
 intervention:
   mode: blur
@@ -123,24 +115,28 @@ explainers:
   - cift_gap
   - rift_policy
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RL policy
-# ─────────────────────────────────────────────────────────────────────────────
 rl:
   algo: ppo
   horizon: 4
   grid: 8
   hidden: 256
+  feat_dim: 1024
 
-  # Conservative stable LR for current CIFT-heavy environment.
   lr: 3.0e-05
   clip: 0.2
   entropy_coef: 0.01
   value_coef: 0.5
-  ppo_epochs: 4
-  epochs: 20
+
+  # Keep 1 for speed with CIFT-heavy training.
+  ppo_epochs: 5
+  epochs: 30
+
+  val_every: 2
+  val_max_batches: 8
+
   protection: true
   reward_preset: full_rift
+  cache_features: true
 
 ablation:
   spec: configs/ablations_rift.yaml
@@ -163,7 +159,7 @@ output:
   correlation_json: outputs/correlation.json
 
 wandb:
-  enabled: true
+  enabled: false
   project: RIFT_ICLR
   entity: null
   group: rift_ffpp_c23
@@ -179,16 +175,17 @@ wandb:
   mode: online
   log_model: false
 
-# Important:
-#   keep none as default for clean experiments.
-#   use resume=auto only when intentionally continuing.
-resume: none
+# auto resumes from latest.pth if present.
+# none starts fresh.
+resume: auto
 
 checkpoint:
+  # Base folder. run_rift.sh will create a stable per-run folder:
+  # outputs/ckpt/RIFT_ffpp_c23_ddp_h4_seed3407
   dir: outputs/ckpt
   metric: rift_score
   mode: max
-  save_every: 5
+  save_every: 1
   top_k: 3
 
 amp:

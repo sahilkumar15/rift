@@ -148,24 +148,31 @@ def build_dataloaders(cfg):
     def coll(b):
         return b
 
-    train_loader = DataLoader(
-        train,
-        batch_size=cfg.get("batch_size", 8),
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=cfg.get("num_workers", 0),
+    num_workers = int(cfg.get("num_workers", 0) or 0)
+
+    loader_kwargs = dict(
+        batch_size=int(cfg.get("batch_size", 8)),
+        num_workers=num_workers,
         pin_memory=True,
         collate_fn=coll,
+        persistent_workers=(num_workers > 0),
+    )
+
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = int(cfg.get("prefetch_factor", 2) or 2)
+
+    train_loader = DataLoader(
+        train,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        **loader_kwargs,
     )
 
     val_loader = DataLoader(
         val,
-        batch_size=cfg.get("batch_size", 8),
         shuffle=False,
         sampler=val_sampler,
-        num_workers=cfg.get("num_workers", 0),
-        pin_memory=True,
-        collate_fn=coll,
+        **loader_kwargs,
     )
 
     if ddp and int(os.environ.get("RANK", "0")) == 0:
