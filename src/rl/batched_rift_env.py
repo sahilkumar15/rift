@@ -228,6 +228,10 @@ class BatchedRIFTEnv:
             k: float(v.mean().item()) if torch.is_tensor(v) else v
             for k, v in comps.items()
         }
+
+        selected_cells = self.mask[:, 0].flatten(1).sum(dim=1)
+        info["selected_cells"] = float(selected_cells.float().mean().item())
+        info["selected_frac"] = float((selected_cells.float() / float(self.n_cells)).mean().item())
         info["identity_gap_mode"] = str(self.identity_gap_mode)
 
         return reward, info
@@ -296,6 +300,12 @@ def _suf(e0, e1, floor=0.0):
 def _harmonic(a, b):
     h = 2.0 * a * b / (a + b + EPS)
     return torch.where((a > 0) & (b > 0), h, torch.zeros_like(h))
+
+
+
+
+
+
 
 
 

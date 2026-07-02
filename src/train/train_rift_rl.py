@@ -209,6 +209,11 @@ def _reduce_metrics(metrics):
         "sufficiency_logit_retained",
         "dense_delta",
         "dense_logit",
+        "reward_delta_component",
+        "reward_logit_component",
+        "sparsity_penalty",
+        "selected_cells",
+        "selected_frac",
         "mask_area",
     ]
 
@@ -765,6 +770,11 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
         "sufficiency_logit_retained": 0.0,
         "dense_delta": 0.0,
         "dense_logit": 0.0,
+        "reward_delta_component": 0.0,
+        "reward_logit_component": 0.0,
+        "sparsity_penalty": 0.0,
+        "selected_cells": 0.0,
+        "selected_frac": 0.0,
         "mask_area": 0.0,
     }
     n = 0
@@ -798,6 +808,11 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
                 "sufficiency_logit_retained": float(info.get("sufficiency_logit", 0.0)),
                 "dense_delta": float(info.get("dense_delta", 0.0)),
                 "dense_logit": float(info.get("dense_logit", 0.0)),
+                "reward_delta_component": float(info.get("reward_delta_component", info.get("dense_delta", 0.0))),
+                "reward_logit_component": float(info.get("reward_logit_component", info.get("dense_logit", 0.0))),
+                "sparsity_penalty": float(info.get("sparsity_penalty", 0.0)),
+                "selected_cells": float(info.get("selected_cells", 0.0)),
+                "selected_frac": float(info.get("selected_frac", 0.0)),
                 "mask_area": float(info.get("mask_area", 0.0)),
             }
 

@@ -1,210 +1,183 @@
 base_config: configs/rift_general.yaml
 root_dir: experiments/ablations/rift_table123
-
 cift:
   root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
   ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
   backbone: convnextv2_base
   config: configs/diffusionfake_mixed.yaml
-
 data:
   train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
   val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
   eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
-
 train:
-  gpus: "4,5,6,7"
+  gpus: 4,5,6,7
   batch_size: 64
   epochs: 30
   workers: 4
   val_every: 2
-  val_max_batches: 8
+  val_max_batches: 4
   resume: auto
   wandb_mode: online
-
+  max_items: null
+  val_max_items: null
 wandb:
   enabled: true
   project: RIFT_ICLR27
   group: rift_table123_ablation
-
 eval:
-  gpu: "4"
+  gpu: '4'
   seed: 3407
   max_items: 512
   candidate_pool: 16
   intervention_mode: blur
   topk_frac: 0.12
   output_dir: experiments/ablations/rift_table123/final_tables
-
 policy_defaults:
   grid: 8
   hidden: 256
   feat_dim: 1024
-
-# ckpt: auto means:
-#   <root_dir>/<run_name>/ckpt/latest.pth
 policies:
   logit_h4:
     run_name: T1_RIFT_logit_only_H4
     reward_preset: generic_logit
     horizon: 4
     ckpt: auto
-
   full_h4:
     run_name: T1_RIFT_full_H4
     reward_preset: full_rift
     horizon: 4
     ckpt: auto
-
   necessity_h4:
     run_name: T2_RIFT_necessity_only_H4
     reward_preset: necessity_only
     horizon: 4
     ckpt: auto
-
   sufficiency_h4:
     run_name: T2_RIFT_sufficiency_only_H4
     reward_preset: sufficiency_only
     horizon: 4
     ckpt: auto
-
   nosparsity_h4:
     run_name: T2_RIFT_no_sparsity_H4
     reward_preset: no_sparsity
     horizon: 4
     ckpt: auto
-
   full_h1:
     run_name: T3_RIFT_full_H1
     reward_preset: full_rift
     horizon: 1
     ckpt: auto
-
   full_h8:
     run_name: T3_RIFT_full_H8
     reward_preset: full_rift
     horizon: 8
     ckpt: auto
-
 tables:
   table1_component:
     filename: table1_component_ablation.csv
     rows:
-      - id: 0
-        variant: Random mask
-        kind: random
-        mask_source: random
-        delta_g: false
-        ns: false
-        rp: false
-
-      - id: 1
-        variant: Grad-CAM logit
-        kind: gradcam
-        mask_source: logit saliency
-        delta_g: false
-        ns: false
-        rp: false
-
-      - id: 2
-        variant: Grad-CAM + causal select
-        kind: causal_select
-        base: gradcam
-        channel: logit
-        mask_source: logit + NS select
-        delta_g: false
-        ns: true
-        rp: false
-
-      - id: 3
-        variant: CIFT-Δ + causal select
-        kind: causal_select
-        base: cift_delta
-        channel: delta
-        mask_source: Δ + NS select
-        delta_g: true
-        ns: true
-        rp: false
-
-      - id: 4
-        variant: RIFT logit-only
-        kind: policy
-        policy: logit_h4
-        mask_source: RL from logit evidence
-        delta_g: false
-        ns: true
-        rp: true
-
-      - id: 5
-        variant: RIFT full
-        kind: policy
-        policy: full_h4
-        mask_source: RL from Δ evidence
-        delta_g: true
-        ns: true
-        rp: true
-
+    - id: 0
+      variant: Random mask
+      kind: random
+      mask_source: random
+      delta_g: false
+      ns: false
+      rp: false
+    - id: 1
+      variant: Grad-CAM logit
+      kind: gradcam
+      mask_source: logit saliency
+      delta_g: false
+      ns: false
+      rp: false
+    - id: 2
+      variant: Grad-CAM + causal select
+      kind: causal_select
+      base: gradcam
+      channel: logit
+      mask_source: logit + NS select
+      delta_g: false
+      ns: true
+      rp: false
+    - id: 3
+      variant: "CIFT-\u0394 + causal select"
+      kind: causal_select
+      base: cift_delta
+      channel: delta
+      mask_source: "\u0394 + NS select"
+      delta_g: true
+      ns: true
+      rp: false
+    - id: 4
+      variant: RIFT logit-only
+      kind: policy
+      policy: logit_h4
+      mask_source: RL from logit evidence
+      delta_g: false
+      ns: true
+      rp: true
+    - id: 5
+      variant: RIFT full
+      kind: policy
+      policy: full_h4
+      mask_source: "RL from \u0394 evidence"
+      delta_g: true
+      ns: true
+      rp: true
   table2_objective:
     filename: table2_objective_ablation.csv
     rows:
-      - id: 1
-        variant: Necessity-only
-        kind: policy
-        policy: necessity_h4
-        necessity: true
-        sufficiency: false
-        sparsity: true
-
-      - id: 2
-        variant: Sufficiency-only
-        kind: policy
-        policy: sufficiency_h4
-        necessity: false
-        sufficiency: true
-        sparsity: true
-
-      - id: 3
-        variant: N+S, no sparsity
-        kind: policy
-        policy: nosparsity_h4
-        necessity: true
-        sufficiency: true
-        sparsity: false
-
-      - id: 4
-        variant: RIFT full
-        kind: policy
-        policy: full_h4
-        necessity: true
-        sufficiency: true
-        sparsity: true
-
+    - id: 1
+      variant: Necessity-only
+      kind: policy
+      policy: necessity_h4
+      necessity: true
+      sufficiency: false
+      sparsity: true
+    - id: 2
+      variant: Sufficiency-only
+      kind: policy
+      policy: sufficiency_h4
+      necessity: false
+      sufficiency: true
+      sparsity: true
+    - id: 3
+      variant: N+S, no sparsity
+      kind: policy
+      policy: nosparsity_h4
+      necessity: true
+      sufficiency: true
+      sparsity: false
+    - id: 4
+      variant: RIFT full
+      kind: policy
+      policy: full_h4
+      necessity: true
+      sufficiency: true
+      sparsity: true
   table3_horizon:
     filename: table3_horizon_ablation.csv
     rows:
-      - id: 1
-        variant: CIFT-Δ top-k fixed
-        kind: cift_delta
-        mask_source: CIFT-Δ top-k fixed
-        horizon: "—"
-
-      - id: 2
-        variant: RL policy H=1
-        kind: policy
-        policy: full_h1
-        mask_source: RL policy
-        horizon: H=1
-
-      - id: 3
-        variant: RL policy H=4
-        kind: policy
-        policy: full_h4
-        mask_source: RL policy
-        horizon: H=4
-
-      - id: 4
-        variant: RL policy H=8
-        kind: policy
-        policy: full_h8
-        mask_source: RL policy
-        horizon: H=8
+    - id: 1
+      variant: "CIFT-\u0394 top-k fixed"
+      kind: cift_delta
+      mask_source: "CIFT-\u0394 top-k fixed"
+      horizon: "\u2014"
+    - id: 2
+      variant: RL policy H=1
+      kind: policy
+      policy: full_h1
+      mask_source: RL policy
+      horizon: H=1
+    - id: 3
+      variant: RL policy H=4
+      kind: policy
+      policy: full_h4
+      mask_source: RL policy
+      horizon: H=4
+    - id: 4
+      variant: RL policy H=8
+      kind: policy
+      policy: full_h8
+      mask_source: RL policy
+      horizon: H=8
