@@ -120,16 +120,15 @@ class FaithfulnessComponents:
         return {k: v for k, v in asdict(self).items()}
 
 
+
+
+
+
+
 def compute_rift_score(
     *,
-    e0_delta: float,
-    e_nec_delta: float,
-    e_suf_delta: float,
-    delta_floor: float = 0.0,
-    e0_logit: float,
-    e_nec_logit: float,
-    e_suf_logit: float,
-    logit_floor: float = 0.0,
+    e0_delta: float, e_nec_delta: float, e_suf_delta: float, delta_floor: float = 0.0,
+    e0_logit: float, e_nec_logit: float, e_suf_logit: float, logit_floor: float = 0.0,
     mask_area: float,
     identity_preservation: float = 1.0,
     perceptual_distance: float = 0.0,
@@ -137,11 +136,14 @@ def compute_rift_score(
     identity_gap_mode: str = "proxy",
     weights: Optional[Dict[str, float]] = None,
 ) -> FaithfulnessComponents:
-    """Compute final RIFT score.
+    """
+    Compute RIFT causal-faithfulness score.
 
-    In proxy mode, delta credit is forcibly disabled.
-    This prevents accidental claims about donor-grounded CIFT Δ when no donor
-    stream was available.
+    objective:
+      harmonic     = harmonic mean of necessity and sufficiency
+      necessity    = necessity-only ablation
+      sufficiency  = sufficiency-only ablation
+      none/off     = no faithfulness objective
     """
     w = {
         "w_delta": 1.0,
@@ -150,6 +152,7 @@ def compute_rift_score(
         "w_identity": 0.3,
         "w_perceptual": 0.2,
         "w_plausibility": 0.0,
+        "objective": "harmonic",
     }
 
     if weights:
@@ -157,36 +160,48 @@ def compute_rift_score(
 
     nec_d = necessity(e0_delta, e_nec_delta, delta_floor)
     suf_d = sufficiency(e0_delta, e_suf_delta, delta_floor)
-    faith_d = harmonic(nec_d, suf_d)
 
     nec_l = necessity(e0_logit, e_nec_logit, logit_floor)
     suf_l = sufficiency(e0_logit, e_suf_logit, logit_floor)
-    faith_l = harmonic(nec_l, suf_l)
 
+    objective = str(w.get("objective", "harmonic")).lower()
+
+    if objective in ("necessity", "necessity_only", "nec"):
+        faith_d = nec_d
+        faith_l = nec_l
+    elif objective in ("sufficiency", "sufficiency_only", "suf"):
+        faith_d = suf_d
+        faith_l = suf_l
+    elif objective in ("none", "off"):
+        faith_d = 0.0
+        faith_l = 0.0
+    else:
+        faith_d = harmonic(nec_d, suf_d)
+        faith_l = harmonic(nec_l, suf_l)
+
+    # HONESTY GUARD: proxy mode cannot claim mechanism faithfulness.
     if identity_gap_mode != "true":
         w["w_delta"] = 0.0
 
-    score = 0.0
-    score += float(w["w_delta"]) * faith_d
-    score += float(w["w_logit"]) * faith_l
-    score -= float(w["w_sparsity"]) * _to_float(mask_area)
-    score -= float(w["w_identity"]) * (1.0 - _to_float(identity_preservation))
-    score -= float(w["w_perceptual"]) * _to_float(perceptual_distance)
+    reward = float(w["w_delta"]) * faith_d + float(w["w_logit"]) * faith_l
+    reward -= float(w["w_sparsity"]) * mask_area
+    reward -= float(w["w_identity"]) * (1.0 - identity_preservation)
+    reward -= float(w["w_perceptual"]) * perceptual_distance
 
     if plausibility_iou is not None:
-        score += float(w["w_plausibility"]) * _to_float(plausibility_iou)
+        reward += float(w["w_plausibility"]) * plausibility_iou
 
     return FaithfulnessComponents(
-        necessity_delta=float(nec_d),
-        sufficiency_delta=float(suf_d),
-        faithfulness_delta=float(faith_d),
-        necessity_logit=float(nec_l),
-        sufficiency_logit=float(suf_l),
-        faithfulness_logit=float(faith_l),
-        mask_area=float(_to_float(mask_area)),
-        identity_preservation=float(_to_float(identity_preservation)),
-        perceptual_distance=float(_to_float(perceptual_distance)),
-        plausibility_iou=None if plausibility_iou is None else float(_to_float(plausibility_iou)),
-        rift_score=float(score),
-        identity_gap_mode=str(identity_gap_mode),
+        necessity_delta=nec_d,
+        sufficiency_delta=suf_d,
+        faithfulness_delta=faith_d,
+        necessity_logit=nec_l,
+        sufficiency_logit=suf_l,
+        faithfulness_logit=faith_l,
+        mask_area=mask_area,
+        identity_preservation=identity_preservation,
+        perceptual_distance=perceptual_distance,
+        plausibility_iou=plausibility_iou,
+        rift_score=float(reward),
+        identity_gap_mode=identity_gap_mode,
     )

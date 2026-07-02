@@ -1,25 +1,11 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# RIFT Ablation Tables 1/2/3
-#
-# This file controls:
-#   - experiment names
-#   - W&B names/groups
-#   - policy checkpoint paths
-#   - reward presets
-#   - horizon choices
-#   - eval CSV / max_items
-#
-# Base config remains configs/rift_general.yaml.
-# Do not manually edit rift_general.yaml for each ablation row.
-# ═══════════════════════════════════════════════════════════════════════════════
-
 base_config: configs/rift_general.yaml
-
 root_dir: experiments/ablations/rift_table123
 
 cift:
   root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
   ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
+  backbone: convnextv2_base
+  config: configs/diffusionfake_mixed.yaml
 
 data:
   train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
@@ -43,6 +29,7 @@ wandb:
 
 eval:
   gpu: "4"
+  seed: 3407
   max_items: 512
   candidate_pool: 16
   intervention_mode: blur
@@ -54,7 +41,6 @@ policy_defaults:
   hidden: 256
   feat_dim: 1024
 
-# Trainable policy rows.
 # ckpt: auto means:
 #   <root_dir>/<run_name>/ckpt/latest.pth
 policies:
@@ -135,7 +121,7 @@ tables:
         kind: causal_select
         base: cift_delta
         channel: delta
-        mask_source: delta + NS select
+        mask_source: Δ + NS select
         delta_g: true
         ns: true
         rp: false
@@ -153,7 +139,7 @@ tables:
         variant: RIFT full
         kind: policy
         policy: full_h4
-        mask_source: RL from delta evidence
+        mask_source: RL from Δ evidence
         delta_g: true
         ns: true
         rp: true

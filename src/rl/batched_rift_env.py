@@ -1,5 +1,14 @@
 # Path: src/rl/batched_rift_env.py
-"""Vectorized RIFT environment for fast multi-GPU PPO."""
+"""Vectorized RIFT environment for fast multi-GPU PPO.
+
+Reward-collapse fix:
+  * STOP/no-op is not allowed by default.
+  * Repeated cells are repaired to the first empty cell.
+  * Raw detector logits are converted to positive evidence by softplus.
+  * Empty masks receive an explicit penalty.
+  * Dense necessity/sufficiency shaping gives PPO signal before the harmonic
+    faithfulness score becomes non-zero.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +37,8 @@ class BatchedRIFTEnv:
         topk_frac: float = 0.12,
         reward_fn: Optional[Dict[str, float]] = None,
         donor=None,
-        allow_stop_as_noop: bool = True,
+        allow_stop_as_noop: bool = False,
+        forbid_revisit: bool = True,
         cache_features: bool = True,
     ):
         assert _HAS_TORCH, "BatchedRIFTEnv requires torch."
@@ -45,6 +55,7 @@ class BatchedRIFTEnv:
         self.reward_fn = dict(reward_fn or {})
         self.donor = donor
         self.allow_stop_as_noop = bool(allow_stop_as_noop)
+        self.forbid_revisit = bool(forbid_revisit)
         self.cache_features = bool(cache_features)
 
         self.B, _, self.H, self.W = image.shape
@@ -52,17 +63,15 @@ class BatchedRIFTEnv:
         self.n_actions = self.n_cells + 1
         self.stop_action = self.n_cells
 
-        # Do NOT call _reset_state() here.
-        # _reset_state() runs expensive frozen CIFT forwards.
-        # The training loop calls env.reset() immediately after construction.
-        # Calling it here would double the CIFT cost per batch.
+        # Cheap initial state only. reset() performs the expensive CIFT forward.
+        # This avoids a duplicate frozen-CIFT forward at env construction time.
         self.step_idx = 0
         self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
         self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
         self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
         self.e0_gap = torch.zeros(self.B, device=self.image.device)
         self.e0_logit = torch.zeros(self.B, device=self.image.device)
-        self.identity_gap_mode = "unknown"
+        self.identity_gap_mode = "proxy"
         self.feat0 = None
 
     def _reset_state(self):
@@ -80,7 +89,7 @@ class BatchedRIFTEnv:
             self.e0_gap = _fix_vec(self.e0_gap, self.B, self.image.device)
 
             logit = self.adapter.predict_logits(self.image)
-            self.e0_logit = torch.sigmoid(_fix_vec(logit, self.B, self.image.device))
+            self.e0_logit = _logit_to_evidence(_fix_vec(logit, self.B, self.image.device))
 
             self.feat0 = None
             if self.cache_features:
@@ -90,18 +99,7 @@ class BatchedRIFTEnv:
                     self.feat0 = None
 
     def reset(self):
-        # Do NOT call _reset_state() here.
-        # _reset_state() runs expensive frozen CIFT forwards.
-        # The training loop calls env.reset() immediately after construction.
-        # Calling it here would double the CIFT cost per batch.
-        self.step_idx = 0
-        self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
-        self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
-        self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
-        self.e0_gap = torch.zeros(self.B, device=self.image.device)
-        self.e0_logit = torch.zeros(self.B, device=self.image.device)
-        self.identity_gap_mode = "unknown"
-        self.feat0 = None
+        self._reset_state()
         return self._state()
 
     def current_mask(self):
@@ -117,6 +115,35 @@ class BatchedRIFTEnv:
             "e0_gap": self.e0_gap.detach().clone(),
         }
 
+    def _first_empty_cell(self, rows):
+        if rows.numel() == 0:
+            return torch.empty(0, device=self.image.device, dtype=torch.long)
+
+        flat = self.mask[rows, 0].flatten(1)
+        empty = flat <= 0
+        return empty.float().argmax(dim=1).long()
+
+    def _repair_actions(self, actions):
+        actions = actions.clamp(0, self.stop_action).clone()
+
+        if not self.allow_stop_as_noop:
+            stop_rows = torch.nonzero(actions == self.stop_action, as_tuple=False).flatten()
+            if stop_rows.numel() > 0:
+                actions[stop_rows] = self._first_empty_cell(stop_rows)
+
+        if self.forbid_revisit:
+            cell_rows = torch.nonzero(actions != self.stop_action, as_tuple=False).flatten()
+            if cell_rows.numel() > 0:
+                cell_actions = actions[cell_rows]
+                rr = torch.div(cell_actions, self.grid, rounding_mode="floor")
+                cc = cell_actions % self.grid
+                already = self.mask[cell_rows, 0, rr, cc] > 0
+                bad_rows = cell_rows[already]
+                if bad_rows.numel() > 0:
+                    actions[bad_rows] = self._first_empty_cell(bad_rows)
+
+        return actions
+
     def step(self, actions):
         actions = actions.detach().to(self.image.device).long().view(-1)
 
@@ -124,11 +151,9 @@ class BatchedRIFTEnv:
             raise RuntimeError(f"actions must have B={self.B} elements, got {actions.numel()}")
 
         self.step_idx += 1
-        actions = actions.clamp(0, self.stop_action)
+        actions = self._repair_actions(actions)
         self.last_action = actions
 
-        # In batched mode STOP is a sparse no-op.
-        # This keeps all samples same-length, which is much faster and DDP-stable.
         cell_mask = actions != self.stop_action
 
         if cell_mask.any():
@@ -136,7 +161,7 @@ class BatchedRIFTEnv:
             rr = torch.div(actions[idx], self.grid, rounding_mode="floor")
             cc = actions[idx] % self.grid
             self.mask[idx, 0, rr, cc] = torch.clamp(
-                self.mask[idx, 0, rr, cc] + 0.5,
+                self.mask[idx, 0, rr, cc] + 1.0,
                 0.0,
                 1.0,
             )
@@ -168,8 +193,12 @@ class BatchedRIFTEnv:
             gap_nec = _fix_vec(gap_nec, self.B, self.image.device)
             gap_suf = _fix_vec(gap_suf, self.B, self.image.device)
 
-            l_nec = torch.sigmoid(_fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device))
-            l_suf = torch.sigmoid(_fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device))
+            l_nec = _logit_to_evidence(
+                _fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device)
+            )
+            l_suf = _logit_to_evidence(
+                _fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device)
+            )
 
         area = _mask_area_per_sample(pm, self.topk_frac)
 
@@ -189,6 +218,7 @@ class BatchedRIFTEnv:
             k: float(v.mean().item()) if torch.is_tensor(v) else v
             for k, v in comps.items()
         }
+        info["identity_gap_mode"] = str(self.identity_gap_mode)
 
         return reward, info
 
@@ -226,6 +256,10 @@ def _identity_gap_tensor(adapter, image, donor=None):
     ), str(mode)
 
 
+def _logit_to_evidence(x):
+    return F.softplus(x.float())
+
+
 def _topk_binary(mask, topk_frac: float):
     B = mask.shape[0]
     flat = mask.flatten(1)
@@ -255,6 +289,8 @@ def _harmonic(a, b):
     return torch.where((a > 0) & (b > 0), h, torch.zeros_like(h))
 
 
+
+
 def _compute_rift_score_tensor(
     *,
     e0_delta,
@@ -274,6 +310,7 @@ def _compute_rift_score_tensor(
         "w_identity": 0.3,
         "w_perceptual": 0.2,
         "w_plausibility": 0.0,
+        "objective": "harmonic",
     }
 
     if weights:
@@ -286,6 +323,7 @@ def _compute_rift_score_tensor(
     suf_l = _suf(e0_logit, e_suf_logit)
 
     objective = str(w.get("objective", "harmonic")).lower()
+
     if objective in ("necessity", "necessity_only", "nec"):
         faith_d = nec_d
         faith_l = nec_l

@@ -194,6 +194,14 @@ def _flat_train_cfg(cfg):
                 "rl.cache_features",
                 cfg.get("cache_features", True),
             ),
+            "allow_stop": _as_bool(
+                _cfg_get(cfg, "rl.allow_stop", cfg.get("allow_stop", False)),
+                default=False,
+            ),
+            "forbid_revisit": _as_bool(
+                _cfg_get(cfg, "rl.forbid_revisit", cfg.get("forbid_revisit", True)),
+                default=True,
+            ),
 
             "intervention_mode": _cfg_get(cfg, "intervention.mode", "blur"),
             "topk_frac": _cfg_get(cfg, "intervention.topk_frac", 0.12),

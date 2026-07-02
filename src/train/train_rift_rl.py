@@ -268,10 +268,41 @@ def _make_env(images, donor, adapter, cfg, weights, grid, horizon):
         reward_fn=weights,
         donor=donor,
         cache_features=_as_bool(cfg.get("cache_features", True), default=True),
+        allow_stop_as_noop=_as_bool(cfg.get("allow_stop", False), default=False),
+        forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
     )
 
 
-def _collect_batched_rollout(policy, env, *, deterministic=False):
+def _mask_invalid_action_logits(logits, state, env, *, allow_stop=False, forbid_revisit=True):
+    import torch
+
+    logits = logits.clone()
+
+    if not allow_stop and hasattr(env, "stop_action") and env.stop_action < logits.shape[1]:
+        logits[:, env.stop_action] = -1e9
+
+    if forbid_revisit:
+        m = state.get("current_mask")
+        if torch.is_tensor(m):
+            if m.dim() == 4:
+                filled = m[:, 0].flatten(1) > 0
+            elif m.dim() == 3:
+                filled = m.flatten(1) > 0
+            else:
+                filled = None
+
+            if filled is not None and filled.shape[1] == env.n_cells:
+                cell_logits = logits[:, : env.n_cells]
+                all_filled = filled.all(dim=1)
+                if all_filled.any():
+                    filled = filled.clone()
+                    filled[all_filled] = False
+                logits[:, : env.n_cells] = cell_logits.masked_fill(filled, -1e9)
+
+    return logits
+
+
+def _collect_batched_rollout(policy, env, *, deterministic=False, allow_stop=False, forbid_revisit=True):
     import torch
 
     buf = BatchedRolloutBuffer()
@@ -280,6 +311,13 @@ def _collect_batched_rollout(policy, env, *, deterministic=False):
 
     for _ in range(env.horizon):
         logits, value = policy(state)
+        logits = _mask_invalid_action_logits(
+            logits,
+            state,
+            env,
+            allow_stop=allow_stop,
+            forbid_revisit=forbid_revisit,
+        )
         logp_all = torch.log_softmax(logits, dim=-1)
 
         if deterministic:
@@ -306,7 +344,6 @@ def _collect_batched_rollout(policy, env, *, deterministic=False):
             break
 
     return buf, info
-
 
 def train(cfg, adapter, dataloaders):
     import torch
@@ -509,7 +546,11 @@ def train(cfg, adapter, dataloaders):
             B = int(images.shape[0])
 
             env = _make_env(images, donor, adapter, cfg, weights, grid, horizon)
-            buf, info = _collect_batched_rollout(policy, env, deterministic=False)
+            buf, info = _collect_batched_rollout(
+                policy, env, deterministic=False,
+                allow_stop=_as_bool(cfg.get("allow_stop", False), default=False),
+                forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
+            )
 
             logs = algo.update(buf)
             gstep += 1
@@ -699,7 +740,11 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
             B = int(images.shape[0])
 
             env = _make_env(images, donor, adapter, cfg, weights, grid, horizon)
-            buf, info = _collect_batched_rollout(policy, env, deterministic=True)
+            buf, info = _collect_batched_rollout(
+                policy, env, deterministic=True,
+                allow_stop=_as_bool(cfg.get("allow_stop", False), default=False),
+                forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
+            )
 
             reward = buf.rewards_tensor(device=device).sum(dim=0)
 

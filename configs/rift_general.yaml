@@ -25,7 +25,7 @@ torch_home: ""
 # ═══════════════════════════════════════════════════════════════════════════════
 experiment:
   root_dir: &experiment_root "experiments"
-  name: &run_name "RIFT_ffpp_h4_full_2"
+  name: &run_name "RIFT_ffpp_h4_full_3"
   group: &run_group "rift_ffpp_c23_full"
   project: &wandb_project "RIFT_ICLR27"
 
@@ -181,6 +181,10 @@ rl:
   protection: true
   reward_preset: full_rift
   cache_features: true
+
+  # Reward-collapse guard: STOP/no-op must stay disabled for training.
+  allow_stop: false
+  forbid_revisit: true
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ABLATION / PAPER BLOCKS
