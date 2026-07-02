@@ -115,7 +115,7 @@ data:
   # With 4 GPUs:
   #   batch_size: 64  => global batch 256
   #   batch_size: 16  => global batch 64
-  batch_size: 64
+  batch_size: 128
   num_workers: 4
   prefetch_factor: 2
   pin_memory: true
@@ -175,16 +175,11 @@ rl:
   ppo_epochs: 5
   epochs: 30
 
-  val_every: 2
+  val_every: 1
   val_max_batches: 8
-
   protection: true
   reward_preset: full_rift
   cache_features: true
-
-  # Reward-collapse guard: STOP/no-op must stay disabled for training.
-  allow_stop: false
-  forbid_revisit: true
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ABLATION / PAPER BLOCKS
@@ -216,7 +211,7 @@ checkpoint:
   mode:             "max"
   save_top_k:       3
   save_last:        true
-  best_filename:    "rift-best-score-epoch={epoch:02d}"
+  best_filename:    "rift-best-score={score:.4f}-epoch={epoch:02d}"
   every_filename:   "rift-epoch={epoch:02d}"
   save_every:       1
   save_epochs:      []

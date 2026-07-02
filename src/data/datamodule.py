@@ -2,20 +2,16 @@
 """Bundles dataset + loaders.
 
 DDP behavior:
-  If launched with torchrun, this uses DistributedSampler so each GPU sees a
-  different shard of the same dataset.
-
-Example:
-  torchrun --nproc_per_node=4 train_rift_rl.py ...
-    rank 0 -> shard 0
-    rank 1 -> shard 1
-    rank 2 -> shard 2
-    rank 3 -> shard 3
+  * Training uses DistributedSampler with shuffling.
+  * Validation uses an exact non-padding distributed sampler so full validation
+    reports the real CSV size instead of a padded number.
 """
 
 from __future__ import annotations
 
+import math
 import os
+from typing import Iterator, Optional
 
 from .ffpp_dataset import FFPPDataset
 
@@ -35,9 +31,8 @@ def _parse_max_items(v):
     if v is None:
         return None
 
-    if isinstance(v, str):
-        if v.strip().lower() in ("", "none", "null", "false", "0"):
-            return None
+    if isinstance(v, str) and v.strip().lower() in ("", "none", "null", "false", "0"):
+        return None
 
     try:
         v = int(v)
@@ -53,24 +48,45 @@ def _maybe_subset(ds, max_items):
     if max_items is None:
         return ds
 
-    try:
-        from torch.utils.data import Subset
-    except Exception:
-        return ds
+    from torch.utils.data import Subset
 
     n = min(len(ds), max_items)
     return Subset(ds, list(range(n)))
 
 
 def _identity_gap_mode(ds):
-    # If Subset, original dataset is ds.dataset.
     base = getattr(ds, "dataset", ds)
     return getattr(base, "identity_gap_mode", "unknown")
 
 
+class ExactDistributedEvalSampler:
+    """DDP eval sampler with no padding and no duplicate validation rows."""
+
+    def __init__(self, dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None):
+        self.dataset = dataset
+
+        if num_replicas is None or rank is None:
+            rank0, world0, _ = _dist_rank_world()
+            self.rank = rank0 if rank is None else int(rank)
+            self.num_replicas = world0 if num_replicas is None else int(num_replicas)
+        else:
+            self.rank = int(rank)
+            self.num_replicas = int(num_replicas)
+
+        self.num_samples = len(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        return None
+
+
 def build_dataloaders(cfg):
     try:
-        import torch  # noqa: F401
         from torch.utils.data import DataLoader
         from torch.utils.data.distributed import DistributedSampler
     except Exception:
@@ -106,17 +122,8 @@ def build_dataloaders(cfg):
         check_limit=cfg.get("check_limit", 0),
     )
 
-    train = FFPPDataset(
-        train_csv,
-        transform=tf_train,
-        **common,
-    )
-
-    val = FFPPDataset(
-        val_csv,
-        transform=tf_eval,
-        **common,
-    )
+    train = FFPPDataset(train_csv, transform=tf_train, **common)
+    val = FFPPDataset(val_csv, transform=tf_eval, **common)
 
     train = _maybe_subset(train, cfg.get("max_items"))
     val = _maybe_subset(val, cfg.get("val_max_items", cfg.get("max_items")))
@@ -134,12 +141,10 @@ def build_dataloaders(cfg):
             drop_last=False,
         )
 
-        val_sampler = DistributedSampler(
+        val_sampler = ExactDistributedEvalSampler(
             val,
             num_replicas=world,
             rank=rank,
-            shuffle=False,
-            drop_last=False,
         )
     else:
         train_sampler = None
@@ -149,13 +154,14 @@ def build_dataloaders(cfg):
         return b
 
     num_workers = int(cfg.get("num_workers", 0) or 0)
+    batch_size = int(cfg.get("batch_size", 8))
 
     loader_kwargs = dict(
-        batch_size=int(cfg.get("batch_size", 8)),
+        batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=bool(cfg.get("pin_memory", True)),
         collate_fn=coll,
-        persistent_workers=(num_workers > 0),
+        persistent_workers=(num_workers > 0 and bool(cfg.get("persistent_workers", True))),
     )
 
     if num_workers > 0:
@@ -176,17 +182,16 @@ def build_dataloaders(cfg):
     )
 
     if ddp and int(os.environ.get("RANK", "0")) == 0:
+        world = int(os.environ.get("WORLD_SIZE", "1"))
         print(
-            f"[ddp datamodule] world={os.environ.get('WORLD_SIZE')} "
+            f"[ddp datamodule] world={world} "
             f"train_total={len(train)} val_total={len(val)} "
-            f"per_rank_train≈{len(train_loader.dataset) // int(os.environ.get('WORLD_SIZE', '1'))}"
+            f"per_rank_train≈{math.ceil(len(train) / world)} "
+            f"per_rank_val_exact≈{math.ceil(len(val) / world)} "
+            f"batch_per_rank={batch_size}"
         )
 
-    return (
-        train_loader,
-        val_loader,
-        _identity_gap_mode(train),
-    )
+    return train_loader, val_loader, _identity_gap_mode(train)
 
 
 def _synthetic_loaders(cfg):

@@ -1,14 +1,5 @@
 # Path: src/rl/batched_rift_env.py
-"""Vectorized RIFT environment for fast multi-GPU PPO.
-
-Reward-collapse fix:
-  * STOP/no-op is not allowed by default.
-  * Repeated cells are repaired to the first empty cell.
-  * Raw detector logits are converted to positive evidence by softplus.
-  * Empty masks receive an explicit penalty.
-  * Dense necessity/sufficiency shaping gives PPO signal before the harmonic
-    faithfulness score becomes non-zero.
-"""
+"""Vectorized RIFT environment for fast multi-GPU PPO."""
 
 from __future__ import annotations
 
@@ -20,7 +11,6 @@ try:
     _HAS_TORCH = True
 except Exception:
     _HAS_TORCH = False
-
 
 EPS = 1e-8
 
@@ -63,8 +53,6 @@ class BatchedRIFTEnv:
         self.n_actions = self.n_cells + 1
         self.stop_action = self.n_cells
 
-        # Cheap initial state only. reset() performs the expensive CIFT forward.
-        # This avoids a duplicate frozen-CIFT forward at env construction time.
         self.step_idx = 0
         self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
         self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
@@ -105,10 +93,29 @@ class BatchedRIFTEnv:
     def current_mask(self):
         return F.interpolate(self.mask, size=(self.H, self.W), mode="nearest")
 
+    def action_mask(self):
+        valid = torch.ones(self.B, self.n_actions, device=self.image.device, dtype=torch.bool)
+
+        if not self.allow_stop_as_noop:
+            valid[:, self.stop_action] = False
+
+        if self.forbid_revisit:
+            filled = self.mask[:, 0].flatten(1) > 0
+            valid[:, : self.n_cells] = ~filled
+
+        dead = ~valid.any(dim=1)
+        if dead.any():
+            valid[dead, : self.n_cells] = True
+            if not self.allow_stop_as_noop:
+                valid[dead, self.stop_action] = False
+
+        return valid
+
     def _state(self) -> Dict[str, Any]:
         return {
             "feat": self.feat0,
             "current_mask": self.mask.detach().clone(),
+            "action_mask": self.action_mask().detach().clone(),
             "confidence": self.e0_logit.detach().clone(),
             "step_idx": torch.full((self.B,), float(self.step_idx), device=self.image.device),
             "last_action": self.last_action.detach().clone().float(),
@@ -121,7 +128,10 @@ class BatchedRIFTEnv:
 
         flat = self.mask[rows, 0].flatten(1)
         empty = flat <= 0
-        return empty.float().argmax(dim=1).long()
+        has_empty = empty.any(dim=1)
+        first = empty.float().argmax(dim=1).long()
+        first = torch.where(has_empty, first, torch.zeros_like(first))
+        return first
 
     def _repair_actions(self, actions):
         actions = actions.clamp(0, self.stop_action).clone()
@@ -261,7 +271,6 @@ def _logit_to_evidence(x):
 
 
 def _topk_binary(mask, topk_frac: float):
-    B = mask.shape[0]
     flat = mask.flatten(1)
     k = max(1, int(float(topk_frac) * flat.shape[1]))
     thresh = flat.topk(k, dim=1).values[:, -1:].clamp(min=1e-6)
@@ -287,6 +296,10 @@ def _suf(e0, e1, floor=0.0):
 def _harmonic(a, b):
     h = 2.0 * a * b / (a + b + EPS)
     return torch.where((a > 0) & (b > 0), h, torch.zeros_like(h))
+
+
+
+
 
 
 

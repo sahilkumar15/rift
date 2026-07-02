@@ -205,6 +205,10 @@ def _reduce_metrics(metrics):
         "faithfulness_ns_logit",
         "necessity_delta_drop",
         "sufficiency_delta_retained",
+        "necessity_logit_drop",
+        "sufficiency_logit_retained",
+        "dense_delta",
+        "dense_logit",
         "mask_area",
     ]
 
@@ -278,11 +282,36 @@ def _mask_invalid_action_logits(logits, state, env, *, allow_stop=False, forbid_
 
     logits = logits.clone()
 
+    # IMPORTANT:
+    # Do NOT use:
+    #   state.get("action_mask") or state.get("valid_actions")
+    # because action_mask is a multi-value torch.Tensor, and Python cannot
+    # convert that tensor to a single True/False value.
+    action_mask = state.get("action_mask", None)
+    if action_mask is None:
+        action_mask = state.get("valid_actions", None)
+
+    if torch.is_tensor(action_mask):
+        mask = action_mask.to(device=logits.device, dtype=torch.bool)
+
+        if mask.dim() == 1:
+            mask = mask.unsqueeze(0)
+
+        if mask.shape[0] == 1 and logits.shape[0] > 1:
+            mask = mask.repeat(logits.shape[0], 1)
+
+        if mask.shape == logits.shape:
+            dead = ~mask.any(dim=1)
+            if dead.any():
+                mask = mask.clone()
+                mask[dead, :] = True
+            return logits.masked_fill(~mask, -1e9)
+
     if not allow_stop and hasattr(env, "stop_action") and env.stop_action < logits.shape[1]:
         logits[:, env.stop_action] = -1e9
 
     if forbid_revisit:
-        m = state.get("current_mask")
+        m = state.get("current_mask", None)
         if torch.is_tensor(m):
             if m.dim() == 4:
                 filled = m[:, 0].flatten(1) > 0
@@ -291,13 +320,14 @@ def _mask_invalid_action_logits(logits, state, env, *, allow_stop=False, forbid_
             else:
                 filled = None
 
-            if filled is not None and filled.shape[1] == env.n_cells:
-                cell_logits = logits[:, : env.n_cells]
+            if filled is not None and hasattr(env, "n_cells") and filled.shape[1] == env.n_cells:
                 all_filled = filled.all(dim=1)
+
                 if all_filled.any():
                     filled = filled.clone()
                     filled[all_filled] = False
-                logits[:, : env.n_cells] = cell_logits.masked_fill(filled, -1e9)
+
+                logits[:, : env.n_cells] = logits[:, : env.n_cells].masked_fill(filled, -1e9)
 
     return logits
 
@@ -599,6 +629,10 @@ def train(cfg, adapter, dataloaders):
                 "faithfulness_ns_logit": 0.0,
                 "necessity_delta_drop": 0.0,
                 "sufficiency_delta_retained": 0.0,
+                "necessity_logit_drop": 0.0,
+                "sufficiency_logit_retained": 0.0,
+                "dense_delta": 0.0,
+                "dense_logit": 0.0,
                 "mask_area": 0.0,
             }
 
@@ -655,6 +689,8 @@ def train(cfg, adapter, dataloaders):
                     f"[val] {metrics['epoch_string']} "
                     f"rift_score={metrics.get('rift_score'):.4f} "
                     f"faith_delta={metrics.get('faithfulness_ns_delta'):.4f} "
+                    f"faith_logit={metrics.get('faithfulness_ns_logit'):.4f} "
+                    f"mask_area={metrics.get('mask_area'):.4f} "
                     f"n={metrics.get('n', 0)} "
                     f"ckpt={paths.get('best')}"
                     f"{es_txt}"
@@ -725,6 +761,10 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
         "faithfulness_ns_logit": 0.0,
         "necessity_delta_drop": 0.0,
         "sufficiency_delta_retained": 0.0,
+        "necessity_logit_drop": 0.0,
+        "sufficiency_logit_retained": 0.0,
+        "dense_delta": 0.0,
+        "dense_logit": 0.0,
         "mask_area": 0.0,
     }
     n = 0
@@ -754,6 +794,10 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
                 "faithfulness_ns_logit": float(info.get("faithfulness_logit", 0.0)),
                 "necessity_delta_drop": float(info.get("necessity_delta", 0.0)),
                 "sufficiency_delta_retained": float(info.get("sufficiency_delta", 0.0)),
+                "necessity_logit_drop": float(info.get("necessity_logit", 0.0)),
+                "sufficiency_logit_retained": float(info.get("sufficiency_logit", 0.0)),
+                "dense_delta": float(info.get("dense_delta", 0.0)),
+                "dense_logit": float(info.get("dense_logit", 0.0)),
                 "mask_area": float(info.get("mask_area", 0.0)),
             }
 

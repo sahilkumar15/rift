@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from .rollout_buffer import RolloutBuffer
-
 try:
     import torch
     _HAS = True
@@ -40,14 +38,9 @@ class PPO:
         self.dual_lr = dual_lr
         self.lmbda = 0.0
 
-    def update(self, buffer: RolloutBuffer, constraint_costs=None):
+    def update(self, buffer, constraint_costs=None):
         if len(buffer) == 0:
-            return {
-                "policy_loss": 0.0,
-                "value_loss": 0.0,
-                "entropy": 0.0,
-                "lambda": self.lmbda,
-            }
+            return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "lambda": self.lmbda}
 
         device = next(self.policy.parameters()).device
 
@@ -58,16 +51,8 @@ class PPO:
             returns = buffer.returns_tensor(self.gamma, device=device).float()
             old_values = buffer.values_tensor(device=device).float()
         else:
-            returns = torch.tensor(
-                buffer.returns(self.gamma),
-                device=device,
-                dtype=torch.float32,
-            ).view(-1, 1)
-            old_values = _stack_2d(
-                getattr(buffer, "values", [0.0] * len(buffer)),
-                device=device,
-                dtype=torch.float32,
-            )
+            returns = torch.tensor(buffer.returns(self.gamma), device=device, dtype=torch.float32).view(-1, 1)
+            old_values = _stack_2d(getattr(buffer, "values", [0.0] * len(buffer)), device=device, dtype=torch.float32)
 
         adv = returns - old_values
         adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
@@ -82,6 +67,7 @@ class PPO:
 
             for t, state in enumerate(buffer.states):
                 logits, value = self.policy(state)
+                logits = _apply_state_action_mask(logits, state)
                 value = value.squeeze(-1)
 
                 a = actions[t].view(-1)
@@ -93,7 +79,6 @@ class PPO:
                 logp = logp_all.gather(1, a.unsqueeze(1)).squeeze(1)
 
                 ratio = torch.exp(logp - old_lp)
-
                 surr1 = ratio * adv_t
                 surr2 = torch.clamp(ratio, 1.0 - self.clip, 1.0 + self.clip) * adv_t
 
@@ -103,9 +88,9 @@ class PPO:
                 p = torch.softmax(logits, dim=-1)
                 ent = ent + (-(p * torch.log(p + 1e-8)).sum(dim=-1)).mean()
 
-            ploss = ploss / T
-            vloss = vloss / T
-            ent = ent / T
+            ploss = ploss / max(T, 1)
+            vloss = vloss / max(T, 1)
+            ent = ent / max(T, 1)
 
             loss = ploss + self.value_coef * vloss - self.entropy_coef * ent
 
@@ -127,6 +112,34 @@ class PPO:
             }
 
         return logs
+
+
+def _apply_state_action_mask(logits, state):
+    mask = state.get("action_mask", None)
+    if mask is None:
+        mask = state.get("valid_actions", None)
+    if not torch.is_tensor(mask):
+        return logits
+
+    mask = mask.to(device=logits.device, dtype=torch.bool)
+
+    if mask.dim() == 1:
+        mask = mask.unsqueeze(0)
+
+    if mask.shape[0] == 1 and logits.shape[0] > 1:
+        mask = mask.repeat(logits.shape[0], 1)
+    elif mask.shape[0] != logits.shape[0]:
+        mask = mask[: logits.shape[0]]
+
+    if mask.shape[1] != logits.shape[1]:
+        return logits
+
+    dead = ~mask.any(dim=1)
+    if dead.any():
+        mask = mask.clone()
+        mask[dead, :] = True
+
+    return logits.masked_fill(~mask, -1e9)
 
 
 def _stack_2d(seq, *, device, dtype):
