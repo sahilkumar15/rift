@@ -274,6 +274,23 @@ def _reduce_metrics(metrics):
         "selected_cells",
         "selected_frac",
         "mask_area",
+        "selected_cells_std",
+        "selected_cells_min",
+        "selected_cells_max",
+        "stopped_frac",
+        "valid_frac_delta",
+        "valid_frac_logit",
+        "mask_cell_entropy",
+        "mask_cell_max_frac",
+        "active_cell_frac",
+        "unique_mask_frac",
+        "mask_center_row",
+        "mask_center_col",
+        "small_mask_penalty",
+        "empty_mask_penalty",
+        "action_entropy",
+        "action_top1_frac",
+        "unique_first_action_frac",
     ]
 
     n = float(metrics.get("n", 0.0))
@@ -300,6 +317,7 @@ def _make_policy(cfg, device, grid):
         n_actions=grid * grid + 1,
         hidden=cfg.get("hidden", 256),
         feat_dim=cfg.get("feat_dim", 1024),
+        state_blind=_as_bool(cfg.get("state_blind", False), default=False),
     ).to(device)
 
 
@@ -338,6 +356,7 @@ def _make_env(images, donor, adapter, cfg, weights, grid, horizon):
         cache_features=_as_bool(cfg.get("cache_features", True), default=True),
         allow_stop_as_noop=_as_bool(cfg.get("allow_stop", False), default=False),
         forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
+        min_cells=int(cfg.get("min_cells", cfg.get("min_selected_cells", 1))),
     )
 
 
@@ -439,6 +458,41 @@ def _collect_batched_rollout(policy, env, *, deterministic=False, allow_stop=Fal
 
     return buf, info
 
+
+
+def _rollout_action_diagnostics(buf, *, n_actions: int):
+    """Return action-diversity diagnostics for a batched rollout."""
+    try:
+        import torch
+
+        if len(buf.actions) == 0:
+            return {}
+        a = torch.stack([x.detach().view(-1).cpu() for x in buf.actions], dim=0)  # T,B
+        first = a[0]
+        all_a = a.flatten()
+        hist = torch.bincount(all_a.clamp(0, n_actions - 1), minlength=n_actions).float()
+        p = hist / hist.sum().clamp_min(1.0)
+        ent = float((-(p * torch.log(p + 1e-8)).sum() / torch.log(torch.tensor(float(max(2, n_actions))))).item())
+        top1 = float(p.max().item())
+        uniq_first = float(torch.unique(first).numel() / max(1, first.numel()))
+        return {
+            "action_entropy": ent,
+            "action_top1_frac": top1,
+            "unique_first_action_frac": uniq_first,
+        }
+    except Exception:
+        return {}
+
+
+def _merge_info_dict(base, extra):
+    out = dict(base or {})
+    for k, v in (extra or {}).items():
+        try:
+            out[k] = float(v)
+        except Exception:
+            pass
+    return out
+
 def train(cfg, adapter, dataloaders):
     import torch
 
@@ -494,6 +548,14 @@ def train(cfg, adapter, dataloaders):
 
     algo = _make_algo(cfg, policy)
     weights = get_reward_weights(cfg.get("reward_preset", "full_rift"))
+    # cfg-level reward shaping overrides. The scorer itself lives in
+    # faithfulness_score.py; keep all ablations using the same code path.
+    for _k in (
+        "min_selected_cells", "w_min_cells", "empty_mask_penalty",
+        "min_evidence", "sparsity_mode", "area_lo", "area_hi",
+    ):
+        if _k in cfg and cfg.get(_k) is not None:
+            weights[_k] = cfg.get(_k)
 
     ckpt = None
     wb = None
@@ -673,6 +735,7 @@ def train(cfg, adapter, dataloaders):
                 allow_stop=_as_bool(cfg.get("allow_stop", False), default=False),
                 forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
             )
+            info = _merge_info_dict(info, _rollout_action_diagnostics(buf, n_actions=grid * grid + 1))
 
             logs = algo.update(buf)
             gstep += 1
@@ -684,6 +747,7 @@ def train(cfg, adapter, dataloaders):
             if _is_main() and wb is not None and (gstep % log_every == 0):
                 wb.log(
                     {f"train/{k}": v for k, v in logs.items()}
+                    | {f"train/{k}": v for k, v in info.items() if isinstance(v, (int, float))}
                     | {
                         "train/reward_total": batch_reward,
                         "train/batch_size": B,
@@ -716,41 +780,29 @@ def train(cfg, adapter, dataloaders):
             metrics = validate(cfg, adapter, _base_policy(policy), val_dl, weights, grid, horizon)
             metrics = _reduce_metrics(metrics)
         else:
-            metrics = {
-                "n": 0,
-                "rift_score": 0.0,
-                "faithfulness_ns_delta": 0.0,
-                "faithfulness_ns_logit": 0.0,
-                "necessity_delta_drop": 0.0,
-                "sufficiency_delta_retained": 0.0,
-                "necessity_logit_drop": 0.0,
-                "sufficiency_logit_retained": 0.0,
-                "dense_delta": 0.0,
-                "dense_logit": 0.0,
-                "reward_delta_component": 0.0,
-                "reward_logit_component": 0.0,
-                "sparsity_penalty": 0.0,
-                "selected_cells": 0.0,
-                "selected_frac": 0.0,
-                "mask_area": 0.0,
-            }
+            # Do not fabricate val/rift_score on skipped epochs. A fake zero can
+            # create a bogus best checkpoint and misleading W&B curves.
+            metrics = {"n": 0, "val_skipped": 1.0}
 
         metrics["epoch_string"] = f"Epoch {epoch + 1}/{epochs}"
 
         should_stop = False
 
         if _is_main():
-            if wb is not None and do_val:
-                wb.log(
-                    {f"val/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))},
-                    step=gstep,
-                )
+            if wb is not None:
+                if do_val:
+                    wb.log(
+                        {f"val/{k}": v for k, v in metrics.items() if isinstance(v, (int, float))},
+                        step=gstep,
+                    )
+                else:
+                    wb.log({"val/skipped": 1.0, "epoch": epoch}, step=gstep)
 
             monitor_key = cfg.get("monitor", "val/rift_score")
             monitor_value = _metric_value(metrics, monitor_key)
 
             save_metrics = dict(metrics)
-            if monitor_value is not None:
+            if do_val and monitor_value is not None:
                 save_metrics[monitor_key] = monitor_value
 
             paths = ckpt.save(
@@ -786,10 +838,10 @@ def train(cfg, adapter, dataloaders):
 
                 msg = (
                     f"[val] {metrics['epoch_string']} "
-                    f"rift_score={metrics.get('rift_score'):.4f} "
-                    f"faith_delta={metrics.get('faithfulness_ns_delta'):.4f} "
-                    f"faith_logit={metrics.get('faithfulness_ns_logit'):.4f} "
-                    f"mask_area={metrics.get('mask_area'):.4f} "
+                    f"rift_score={metrics.get('rift_score', 0.0):.4f} "
+                    f"faith_delta={metrics.get('faithfulness_ns_delta', 0.0):.4f} "
+                    f"faith_logit={metrics.get('faithfulness_ns_logit', 0.0):.4f} "
+                    f"mask_area={metrics.get('mask_area', 0.0):.4f} "
                     f"dense_delta={metrics.get('dense_delta', 0.0):.4f} "
                     f"dense_logit={metrics.get('dense_logit', 0.0):.4f} "
                     f"sparsity={metrics.get('sparsity_penalty', 0.0):.4f} "
@@ -874,6 +926,23 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
         "selected_cells": 0.0,
         "selected_frac": 0.0,
         "mask_area": 0.0,
+        "selected_cells_std": 0.0,
+        "selected_cells_min": 0.0,
+        "selected_cells_max": 0.0,
+        "stopped_frac": 0.0,
+        "valid_frac_delta": 0.0,
+        "valid_frac_logit": 0.0,
+        "mask_cell_entropy": 0.0,
+        "mask_cell_max_frac": 0.0,
+        "active_cell_frac": 0.0,
+        "unique_mask_frac": 0.0,
+        "mask_center_row": 0.0,
+        "mask_center_col": 0.0,
+        "small_mask_penalty": 0.0,
+        "empty_mask_penalty": 0.0,
+        "action_entropy": 0.0,
+        "action_top1_frac": 0.0,
+        "unique_first_action_frac": 0.0,
     }
     n = 0
 
@@ -893,6 +962,7 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
                 allow_stop=_as_bool(cfg.get("allow_stop", False), default=False),
                 forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
             )
+            info = _merge_info_dict(info, _rollout_action_diagnostics(buf, n_actions=grid * grid + 1))
 
             reward = buf.rewards_tensor(device=device).sum(dim=0)
 
@@ -912,6 +982,23 @@ def validate(cfg, adapter, policy, val_dl, weights, grid, horizon):
                 "selected_cells": float(info.get("selected_cells", 0.0)),
                 "selected_frac": float(info.get("selected_frac", 0.0)),
                 "mask_area": float(info.get("mask_area", 0.0)),
+                "selected_cells_std": float(info.get("selected_cells_std", 0.0)),
+                "selected_cells_min": float(info.get("selected_cells_min", 0.0)),
+                "selected_cells_max": float(info.get("selected_cells_max", 0.0)),
+                "stopped_frac": float(info.get("stopped_frac", 0.0)),
+                "valid_frac_delta": float(info.get("valid_frac_delta", 0.0)),
+                "valid_frac_logit": float(info.get("valid_frac_logit", 0.0)),
+                "mask_cell_entropy": float(info.get("mask_cell_entropy", 0.0)),
+                "mask_cell_max_frac": float(info.get("mask_cell_max_frac", 0.0)),
+                "active_cell_frac": float(info.get("active_cell_frac", 0.0)),
+                "unique_mask_frac": float(info.get("unique_mask_frac", 0.0)),
+                "mask_center_row": float(info.get("mask_center_row", 0.0)),
+                "mask_center_col": float(info.get("mask_center_col", 0.0)),
+                "small_mask_penalty": float(info.get("small_mask_penalty", 0.0)),
+                "empty_mask_penalty": float(info.get("empty_mask_penalty", 0.0)),
+                "action_entropy": float(info.get("action_entropy", 0.0)),
+                "action_top1_frac": float(info.get("action_top1_frac", 0.0)),
+                "unique_first_action_frac": float(info.get("unique_first_action_frac", 0.0)),
             }
 
             for k, v in vals.items():

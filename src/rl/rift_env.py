@@ -95,7 +95,7 @@ class RIFTEnv:
 
     def _terminal_reward(self):
         from ..interventions.interventions import apply_necessity, apply_sufficiency, mask_area
-        from ..faithfulness.faithfulness_score import compute_rift_score
+        from ..faithfulness.faithfulness_score import compute_rift_score, logit_to_evidence
         pm = self.current_mask()
         with torch.no_grad():
             nec_img=apply_necessity(self.image, pm, self.intervention_mode, self.topk_frac)
@@ -106,9 +106,14 @@ class RIFTEnv:
                       source_id=self.source_id, target_id=self.target_id)
             l_nec=float(self.adapter.predict_logits(nec_img).mean().item())
             l_suf=float(self.adapter.predict_logits(suf_img).mean().item())
+        # CRITICAL: raw logits are signed; floor-0 necessity/sufficiency collapses
+        # to 0 whenever e0_logit <= 0 (real images, borderline fakes). Map to
+        # non-negative evidence exactly as BatchedRIFTEnv does.
         comp=compute_rift_score(
             e0_delta=self.e0_gap, e_nec_delta=gap_nec.value, e_suf_delta=gap_suf.value,
-            e0_logit=self.e0_logit, e_nec_logit=l_nec, e_suf_logit=l_suf,
+            e0_logit=logit_to_evidence(self.e0_logit),
+            e_nec_logit=logit_to_evidence(l_nec),
+            e_suf_logit=logit_to_evidence(l_suf),
             mask_area=mask_area(pm, self.topk_frac),
             identity_gap_mode=gap_nec.mode.value,
             weights=(self.reward_fn or {}),

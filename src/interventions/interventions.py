@@ -28,12 +28,31 @@ except Exception:
 
 
 def _to_binary(mask, topk_frac: float):
-    """mask: (B,1,H,W) soft in [0,1] -> binary keeping top-k fraction per sample."""
-    B = mask.shape[0]
+    """Convert a soft or grid mask to a binary intervention mask.
+
+    RIFT policies produce accumulated 0/1 grid masks. For those masks the
+    intended intervention region is exactly the selected cells, not an arbitrary
+    top-k subset. For soft maps from Grad-CAM/external explainers, keep the
+    top-k fraction per sample.
+    """
+    if not _HAS_TORCH:
+        raise RuntimeError("torch required at runtime (Katz).")
+
+    mask = mask.float()
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+
+    # Hard policy masks are already binary after nearest-neighbor upsampling.
+    # Treat every positive selected cell as part of the intervention.
+    with torch.no_grad():
+        hard_like = bool(((mask <= 1e-6) | (mask >= 1.0 - 1e-6)).all().item())
+    if hard_like:
+        return (mask > 1e-6).float()
+
     flat = mask.flatten(1)
-    k = max(1, int(topk_frac * flat.shape[1]))
-    thresh = flat.topk(k, dim=1).values[:, -1:].clamp(min=1e-6)
-    return (mask.flatten(1) >= thresh).view_as(mask).float()
+    k = max(1, min(flat.shape[1], int(round(float(topk_frac) * flat.shape[1]))))
+    thresh = flat.topk(k, dim=1).values[:, -1:].clamp(min=1e-12)
+    return (flat >= thresh).view_as(mask).float()
 
 
 def apply_necessity(image, mask, mode: str = "blur", topk_frac: float = 0.1):

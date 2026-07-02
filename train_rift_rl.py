@@ -183,6 +183,21 @@ def _flat_train_cfg(cfg):
                 "rl.reward_preset",
                 cfg.get("reward_preset", "full_rift"),
             ),
+            "min_selected_cells": _cfg_get(
+                cfg,
+                "rl.min_selected_cells",
+                cfg.get("min_selected_cells", 1.0),
+            ),
+            "w_min_cells": _cfg_get(
+                cfg,
+                "rl.w_min_cells",
+                cfg.get("w_min_cells", 0.10),
+            ),
+            "empty_mask_penalty": _cfg_get(
+                cfg,
+                "rl.empty_mask_penalty",
+                cfg.get("empty_mask_penalty", 0.25),
+            ),
             "val_every": _cfg_get(cfg, "rl.val_every", cfg.get("val_every", 1)),
             "val_max_batches": _cfg_get(
                 cfg,
@@ -202,6 +217,28 @@ def _flat_train_cfg(cfg):
                 _cfg_get(cfg, "rl.forbid_revisit", cfg.get("forbid_revisit", True)),
                 default=True,
             ),
+
+            "min_cells": _cfg_get(
+                cfg,
+                "rl.min_cells",
+                _cfg_get(cfg, "rl.min_selected_cells", cfg.get("min_selected_cells", 1)),
+            ),
+            "state_blind": _as_bool(
+                _cfg_get(cfg, "rl.state_blind", cfg.get("state_blind", False)),
+                default=False,
+            ),
+            "min_evidence": _cfg_get(
+                cfg,
+                "rl.min_evidence",
+                cfg.get("min_evidence", 0.0),
+            ),
+            "sparsity_mode": _cfg_get(
+                cfg,
+                "rl.sparsity_mode",
+                cfg.get("sparsity_mode", "linear"),
+            ),
+            "area_lo": _cfg_get(cfg, "rl.area_lo", cfg.get("area_lo", 0.02)),
+            "area_hi": _cfg_get(cfg, "rl.area_hi", cfg.get("area_hi", 0.35)),
 
             "intervention_mode": _cfg_get(cfg, "intervention.mode", "blur"),
             "topk_frac": _cfg_get(cfg, "intervention.topk_frac", 0.12),

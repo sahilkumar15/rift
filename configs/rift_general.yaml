@@ -179,7 +179,25 @@ rl:
   val_max_batches: 8
   protection: true
   reward_preset: full_rift
+
+  # Fixed-H4 default: always exactly 4 unique cells. Therefore selected_cells,
+  # selected_frac, and mask_area are expected to be flat in W&B. Use the
+  # action/mask-location diagnostics to detect policy collapse.
+  min_selected_cells: 1
+  min_cells: 1
   cache_features: true
+  allow_stop: false       # false => H4 always selects exactly 4 cells; true learns variable mask size
+  forbid_revisit: true
+  state_blind: false      # true => budget-matched ablation hiding mask/step/last-action state
+
+  # Reward/evidence guards. For variable-mask sparsity ablations, try
+  # allow_stop=true and sparsity_mode=hinge.
+  min_evidence: 0.0
+  sparsity_mode: linear   # linear | hinge
+  area_lo: 0.02
+  area_hi: 0.35
+  empty_mask_penalty: 0.25
+  w_min_cells: 0.10
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ABLATION / PAPER BLOCKS
