@@ -152,6 +152,65 @@ def _metric_value(metrics, monitor):
     return None
 
 
+
+def _safe_len(obj, default=0):
+    try:
+        return int(len(obj))
+    except Exception:
+        return int(default)
+
+
+def _loader_plan(dl):
+    dataset_total = _safe_len(getattr(dl, "dataset", []))
+    sampler = getattr(dl, "sampler", None)
+    per_rank = _safe_len(sampler, dataset_total)
+    batches = _safe_len(dl, 0)
+    batch_per_gpu = int(getattr(dl, "batch_size", 0) or 0)
+    return dataset_total, per_rank, batches, batch_per_gpu
+
+
+def _print_runtime_plan(cfg, train_dl, val_dl, *, resume_path, start_epoch, gstep):
+    if not _is_main():
+        return
+
+    world = _world()
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    train_total, per_rank_train, train_batches, batch_per_gpu = _loader_plan(train_dl)
+    val_total, per_rank_val, val_batches, val_batch_per_gpu = _loader_plan(val_dl)
+    global_batch = max(1, world) * max(1, batch_per_gpu)
+    val_max_batches = int(cfg.get("val_max_batches", 0) or 0)
+    effective_val_batches = min(val_batches, val_max_batches) if val_max_batches > 0 else val_batches
+    data_cfg = cfg.get("data", {}) or {}
+    train_max_items = data_cfg.get("max_items", None)
+    val_max_items = data_cfg.get("val_max_items", None)
+
+    print("═══════════════════════════════════════════════════════════", flush=True)
+    print(" RIFT DDP/runtime plan", flush=True)
+    print(f" requested_gpus     : {visible or '<not-set>'}", flush=True)
+    print(f" world_size         : {world}", flush=True)
+    print(f" batch_per_gpu      : {batch_per_gpu}", flush=True)
+    print(f" global_batch       : {global_batch}", flush=True)
+    print(f" train_total        : {train_total}", flush=True)
+    print(f" train_max_items    : {train_max_items if train_max_items is not None else 'FULL'}", flush=True)
+    print(f" per_rank_train     : {per_rank_train}", flush=True)
+    print(f" batches_per_epoch  : {train_batches}", flush=True)
+    print(f" val_total          : {val_total}", flush=True)
+    print(f" val_max_items      : {val_max_items if val_max_items is not None else 'FULL'}", flush=True)
+    print(f" per_rank_val       : {per_rank_val}", flush=True)
+    print(f" val_batches/rank   : {val_batches}", flush=True)
+    print(f" val_max_batches    : {val_max_batches if val_max_batches > 0 else 'FULL'}", flush=True)
+    print(f" val_batches_used   : {effective_val_batches}", flush=True)
+    print(f" horizon/grid       : {cfg.get('horizon', 4)} / {cfg.get('grid', 8)}", flush=True)
+    print(f" reward_preset      : {cfg.get('reward_preset', 'full_rift')}", flush=True)
+    print(f" checkpoint_dir     : {cfg.get('out_dir')}", flush=True)
+    print(f" resume_mode        : {cfg.get('resume', 'auto')}", flush=True)
+    print(f" resume_path        : {resume_path or '<none>'}", flush=True)
+    print(f" start_epoch        : {start_epoch}", flush=True)
+    print(f" global_step        : {gstep}", flush=True)
+    print(f" wandb_name         : {cfg.get('wandb_name') or cfg.get('exp_name')}", flush=True)
+    print("═══════════════════════════════════════════════════════════", flush=True)
+
+
 def _is_better(value, best, mode, min_delta=0.0):
     if value is None:
         return False
@@ -521,6 +580,34 @@ def train(cfg, adapter, dataloaders):
 
     _ddp_barrier()
 
+    _print_runtime_plan(
+        cfg,
+        train_dl,
+        val_dl,
+        resume_path=resume_path,
+        start_epoch=start_epoch,
+        gstep=gstep,
+    )
+
+    if _is_main() and wb is not None:
+        train_total, per_rank_train, train_batches, batch_per_gpu = _loader_plan(train_dl)
+        val_total, per_rank_val, val_batches, _ = _loader_plan(val_dl)
+        wb.log(
+            {
+                "runtime/world_size": _world(),
+                "runtime/batch_per_gpu": batch_per_gpu,
+                "runtime/global_batch": _world() * batch_per_gpu,
+                "runtime/train_total": train_total,
+                "runtime/per_rank_train": per_rank_train,
+                "runtime/batches_per_epoch": train_batches,
+                "runtime/val_total": val_total,
+                "runtime/per_rank_val": per_rank_val,
+                "runtime/val_batches_per_rank": val_batches,
+                "runtime/val_max_batches": int(cfg.get("val_max_batches", 0) or 0),
+            },
+            step=gstep,
+        )
+
     epochs = int(cfg.get("epochs", 50))
     val_every = int(cfg.get("val_every", 1) or 1)
     log_every = int(cfg.get("train_log_every", 10) or 10)
@@ -600,6 +687,8 @@ def train(cfg, adapter, dataloaders):
                     | {
                         "train/reward_total": batch_reward,
                         "train/batch_size": B,
+                        "train/batch_per_gpu": B,
+                        "train/global_batch": B * _world(),
                         "epoch": epoch,
                         "rank0/local_items": local_items,
                     },
@@ -638,6 +727,11 @@ def train(cfg, adapter, dataloaders):
                 "sufficiency_logit_retained": 0.0,
                 "dense_delta": 0.0,
                 "dense_logit": 0.0,
+                "reward_delta_component": 0.0,
+                "reward_logit_component": 0.0,
+                "sparsity_penalty": 0.0,
+                "selected_cells": 0.0,
+                "selected_frac": 0.0,
                 "mask_area": 0.0,
             }
 
@@ -696,6 +790,10 @@ def train(cfg, adapter, dataloaders):
                     f"faith_delta={metrics.get('faithfulness_ns_delta'):.4f} "
                     f"faith_logit={metrics.get('faithfulness_ns_logit'):.4f} "
                     f"mask_area={metrics.get('mask_area'):.4f} "
+                    f"dense_delta={metrics.get('dense_delta', 0.0):.4f} "
+                    f"dense_logit={metrics.get('dense_logit', 0.0):.4f} "
+                    f"sparsity={metrics.get('sparsity_penalty', 0.0):.4f} "
+                    f"selected_cells={metrics.get('selected_cells', 0.0):.2f} "
                     f"n={metrics.get('n', 0)} "
                     f"ckpt={paths.get('best')}"
                     f"{es_txt}"

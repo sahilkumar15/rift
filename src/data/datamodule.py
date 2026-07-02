@@ -183,12 +183,42 @@ def build_dataloaders(cfg):
 
     if ddp and int(os.environ.get("RANK", "0")) == 0:
         world = int(os.environ.get("WORLD_SIZE", "1"))
+        global_batch = world * batch_size
+        train_per_rank = len(train_sampler) if train_sampler is not None else len(train)
+        val_per_rank = len(val_sampler) if val_sampler is not None else len(val)
+        expected_train_batches = len(train_loader)
+        expected_val_batches = len(val_loader)
+        max_items = cfg.get("max_items", None)
+        val_max_items = cfg.get("val_max_items", cfg.get("max_items", None))
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
         print(
-            f"[ddp datamodule] world={world} "
-            f"train_total={len(train)} val_total={len(val)} "
-            f"per_rank_train≈{math.ceil(len(train) / world)} "
-            f"per_rank_val_exact≈{math.ceil(len(val) / world)} "
-            f"batch_per_rank={batch_size}"
+            "[ddp datamodule] "
+            f"requested_gpus={visible or '<not-set>'} "
+            f"world={world} "
+            f"batch_per_gpu={batch_size} "
+            f"global_batch={global_batch} "
+            f"train_total={len(train)} "
+            f"train_max_items={max_items if max_items is not None else 'FULL'} "
+            f"per_rank_train={train_per_rank} "
+            f"expected_batches_per_epoch={expected_train_batches} "
+            f"val_total={len(val)} "
+            f"val_max_items={val_max_items if val_max_items is not None else 'FULL'} "
+            f"per_rank_val={val_per_rank} "
+            f"expected_val_batches_per_rank={expected_val_batches}",
+            flush=True,
+        )
+    elif (not ddp) and int(os.environ.get("RANK", "0")) == 0:
+        max_items = cfg.get("max_items", None)
+        val_max_items = cfg.get("val_max_items", cfg.get("max_items", None))
+        print(
+            "[single datamodule] "
+            f"batch_per_gpu={batch_size} global_batch={batch_size} "
+            f"train_total={len(train)} train_max_items={max_items if max_items is not None else 'FULL'} "
+            f"expected_batches_per_epoch={len(train_loader)} "
+            f"val_total={len(val)} val_max_items={val_max_items if val_max_items is not None else 'FULL'} "
+            f"expected_val_batches={len(val_loader)}",
+            flush=True,
         )
 
     return train_loader, val_loader, _identity_gap_mode(train)

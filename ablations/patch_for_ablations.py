@@ -226,6 +226,7 @@ def _compute_rift_score_tensor(
     identity_gap_mode: str,
     weights=None,
 ):
+    """Vectorized RIFT reward with explicit component logging."""
     w = {
         "w_delta": 1.0,
         "w_logit": 0.5,
@@ -261,9 +262,13 @@ def _compute_rift_score_tensor(
         faith_l = _harmonic(nec_l, suf_l)
 
     w_delta = float(w["w_delta"]) if str(identity_gap_mode) == "true" else 0.0
+    w_logit = float(w["w_logit"])
+    w_sparsity = float(w["w_sparsity"])
 
-    reward = w_delta * faith_d + float(w["w_logit"]) * faith_l
-    reward = reward - float(w["w_sparsity"]) * mask_area
+    reward_delta_component = w_delta * faith_d
+    reward_logit_component = w_logit * faith_l
+    sparsity_penalty = w_sparsity * mask_area
+    reward = reward_delta_component + reward_logit_component - sparsity_penalty
 
     comps = {
         "rift_score": reward,
@@ -273,6 +278,11 @@ def _compute_rift_score_tensor(
         "sufficiency_delta": suf_d,
         "necessity_logit": nec_l,
         "sufficiency_logit": suf_l,
+        "dense_delta": reward_delta_component,
+        "dense_logit": reward_logit_component,
+        "reward_delta_component": reward_delta_component,
+        "reward_logit_component": reward_logit_component,
+        "sparsity_penalty": sparsity_penalty,
         "mask_area": mask_area,
     }
 
@@ -283,8 +293,19 @@ def _compute_rift_score_tensor(
     print("[write] src/rl/batched_rift_env.py _compute_rift_score_tensor")
 
 
+def ensure_ablation_lib() -> None:
+    Path("ablations/lib").mkdir(parents=True, exist_ok=True)
+    Path("ablations/lib/__init__.py").touch()
+    required = [Path("ablations/lib/manifest.py"), Path("ablations/lib/explainers.py")]
+    missing = [str(x) for x in required if not x.exists()]
+    if missing:
+        raise RuntimeError("Missing ablation library files: " + ", ".join(missing))
+    print("[ok] ablations/lib present")
+
+
 if __name__ == "__main__":
     print("=== Applying RIFT Table123 patches ===")
+    ensure_ablation_lib()
     write_reward_presets()
     patch_faithfulness_score()
     patch_batched_env()

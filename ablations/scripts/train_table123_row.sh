@@ -36,7 +36,26 @@ echo " run_name         : $RUN_NAME"
 echo " reward           : $REWARD_PRESET"
 echo " horizon          : $HORIZON"
 echo " gpus             : $GPUS"
+IFS=',' read -ra _RIFT_ABL_GPU_ARR <<< "$GPUS"
+_WORLD_SIZE="${#_RIFT_ABL_GPU_ARR[@]}"
+_GLOBAL_BATCH=$(( _WORLD_SIZE * BATCH ))
+_TRAIN_ROWS="$(python - "$TRAIN_CSV" <<'PYROWS'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.exists():
+    print("")
+else:
+    print(max(0, sum(1 for _ in p.open("rb")) - 1))
+PYROWS
+)"
+_EXPECTED_BATCHES="<unknown>"
+if [[ "$_TRAIN_ROWS" =~ ^[0-9]+$ && "$_GLOBAL_BATCH" -gt 0 ]]; then
+  _EXPECTED_BATCHES=$(( (_TRAIN_ROWS + _GLOBAL_BATCH - 1) / _GLOBAL_BATCH ))
+fi
 echo " batch/per-gpu    : $BATCH"
+echo " world/global_bs  : $_WORLD_SIZE / $_GLOBAL_BATCH"
+echo " expected batches : $_EXPECTED_BATCHES"
 echo " epochs           : $EPOCHS"
 echo " train_max_items  : ${TRAIN_MAX_ITEMS:-FULL}"
 echo " val_max_items    : ${VAL_MAX_ITEMS:-FULL}"

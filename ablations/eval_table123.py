@@ -94,9 +94,11 @@ def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
     if kind == "policy":
         key = row["policy"]
         p = manifest["policies"][key]
+        ckpt = policy_ckpt(manifest, key)
+        print(f"  policy={key} ckpt={ckpt}", flush=True)
 
         return PolicyExplainer(
-            policy_ckpt(manifest, key),
+            ckpt,
             grid=int(pd.get("grid", 8)),
             hidden=int(pd.get("hidden", 256)),
             feat_dim=int(pd.get("feat_dim", 1024)),

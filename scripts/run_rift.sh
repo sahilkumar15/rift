@@ -123,6 +123,35 @@ has_extra_prefix() {
   return 1
 }
 
+extra_value() {
+  local key="$1"
+  local x
+
+  for x in "${EXTRA[@]}"; do
+    if [[ "$x" == "$key="* ]]; then
+      echo "${x#*=}"
+      return 0
+    fi
+  done
+
+  echo ""
+}
+
+count_csv_rows() {
+  local p="$1"
+  python - "$p" <<'PYCSV'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not str(p) or not p.exists():
+    print("")
+else:
+    with p.open("rb") as f:
+        n = sum(1 for _ in f)
+    print(max(0, n - 1))
+PYCSV
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --gpus)      GPUS="$2"; shift 2 ;;
@@ -199,8 +228,10 @@ fi
 
 [[ $MISSING -eq 1 ]] && { echo "Fix paths above, then re-run."; exit 1; }
 
-EXPERIMENT_ROOT="${YAML_EXPERIMENT_ROOT:-experiments}"
-EXPERIMENT_NAME="${YAML_EXPERIMENT_NAME:-RIFT}"
+EXPERIMENT_ROOT="$(extra_value experiment.root_dir)"
+EXPERIMENT_NAME="$(extra_value experiment.name)"
+[[ -z "$EXPERIMENT_ROOT" ]] && EXPERIMENT_ROOT="${YAML_EXPERIMENT_ROOT:-experiments}"
+[[ -z "$EXPERIMENT_NAME" ]] && EXPERIMENT_NAME="${YAML_EXPERIMENT_NAME:-RIFT}"
 EXPERIMENT_DIR="$(abs_path "${EXPERIMENT_ROOT}/${EXPERIMENT_NAME}")"
 
 mkdir -p "${EXPERIMENT_DIR}/logs" "${EXPERIMENT_DIR}/ckpt"
@@ -238,6 +269,23 @@ DISPLAY_BATCH="${BATCH:-${YAML_BATCH:-<yaml>}}"
 DISPLAY_WORKERS="${NUM_WORKERS:-${YAML_WORKERS:-<yaml>}}"
 DISPLAY_SEEDS="${SEEDS:-${YAML_SEED:-<yaml>}}"
 DISPLAY_WANDB="${WANDB:-${YAML_WANDB:-<yaml>}}"
+BATCH_SOURCE="$([[ -n "$BATCH" ]] && echo cli || echo yaml)"
+EPOCHS_SOURCE="$([[ -n "$EPOCHS" ]] && echo cli || echo yaml)"
+WORKERS_SOURCE="$([[ -n "$NUM_WORKERS" ]] && echo cli || echo yaml)"
+IFS=',' read -ra DISPLAY_GPU_ARR <<< "$GPUS"
+DISPLAY_WORLD="${#DISPLAY_GPU_ARR[@]}"
+DISPLAY_GLOBAL_BATCH="<unknown>"
+if [[ "$DISPLAY_BATCH" =~ ^[0-9]+$ ]]; then
+  DISPLAY_GLOBAL_BATCH=$(( DISPLAY_WORLD * DISPLAY_BATCH ))
+fi
+DISPLAY_TRAIN_CSV="${CSV:-${YAML_TRAIN_CSV:-}}"
+DISPLAY_VAL_CSV="${VAL_CSV:-${YAML_VAL_CSV:-}}"
+DISPLAY_TRAIN_ROWS="$(count_csv_rows "$DISPLAY_TRAIN_CSV")"
+DISPLAY_VAL_ROWS="$(count_csv_rows "$DISPLAY_VAL_CSV")"
+DISPLAY_EST_BATCHES="<unknown>"
+if [[ "$DISPLAY_GLOBAL_BATCH" =~ ^[0-9]+$ && "$DISPLAY_TRAIN_ROWS" =~ ^[0-9]+$ && "$DISPLAY_GLOBAL_BATCH" -gt 0 ]]; then
+  DISPLAY_EST_BATCHES=$(( (DISPLAY_TRAIN_ROWS + DISPLAY_GLOBAL_BATCH - 1) / DISPLAY_GLOBAL_BATCH ))
+fi
 
 echo "═══════════════════════════════════════════════════════════"
 echo " RIFT  ·  mode=$MODE  block=${BLOCK:-all}  only=${ONLY:-all}"
@@ -248,9 +296,12 @@ echo " cift-root : ${CIFT_ROOT:-<from yaml>}"
 echo " ckpt      : ${CKPT:-<from yaml>}"
 echo " csv       : ${CSV:-<from yaml>}"
 echo " val-csv   : ${VAL_CSV:-<from yaml>}"
-echo " gpus      : $GPUS   seeds: $DISPLAY_SEEDS   batch: $DISPLAY_BATCH   epochs: $DISPLAY_EPOCHS"
-echo " workers   : $DISPLAY_WORKERS   horizon: $DISPLAY_HORIZON"
-echo " wandb     : $DISPLAY_WANDB   dry-run: $([[ $DRY -eq 1 ]] && echo yes || echo no)"
+echo " gpus      : $GPUS   world: $DISPLAY_WORLD   seeds: $DISPLAY_SEEDS"
+echo " batch/gpu : $DISPLAY_BATCH   source: $BATCH_SOURCE   global_batch: $DISPLAY_GLOBAL_BATCH"
+echo " epochs   : $DISPLAY_EPOCHS   source: $EPOCHS_SOURCE"
+echo " workers  : $DISPLAY_WORKERS   source: $WORKERS_SOURCE   horizon: $DISPLAY_HORIZON"
+echo " rows est : train=${DISPLAY_TRAIN_ROWS:-<unknown>} val=${DISPLAY_VAL_ROWS:-<unknown>} batches/epoch≈$DISPLAY_EST_BATCHES"
+echo " wandb    : $DISPLAY_WANDB   dry-run: $([[ $DRY -eq 1 ]] && echo yes || echo no)"
 echo "═══════════════════════════════════════════════════════════"
 
 get_audit_csv() {
@@ -294,8 +345,8 @@ stable_ckpt_dir() {
     return
   fi
 
-  local root="${YAML_EXPERIMENT_ROOT:-experiments}"
-  local name="${YAML_EXPERIMENT_NAME:-RIFT}"
+  local root="${EXPERIMENT_ROOT:-${YAML_EXPERIMENT_ROOT:-experiments}}"
+  local name="${EXPERIMENT_NAME:-${YAML_EXPERIMENT_NAME:-RIFT}}"
   local base="${YAML_CKPT_DIR:-${root}/${name}/ckpt}"
 
   base="$(abs_path "$base")"
@@ -375,8 +426,22 @@ run_ddp_train() {
   echo " seed       : $seed"
   echo " train_csv  : ${CSV:-${YAML_TRAIN_CSV:-<from yaml>}}"
   echo " val_csv    : ${VAL_CSV:-${YAML_VAL_CSV:-<from yaml>}}"
-  echo " batch      : ${BATCH:-${YAML_BATCH:-<from yaml>}}"
-  echo " epochs     : ${EPOCHS:-${YAML_EPOCHS:-<from yaml>}}"
+  local shown_batch="${BATCH:-${YAML_BATCH:-<from yaml>}}"
+  local shown_epochs="${EPOCHS:-${YAML_EPOCHS:-<from yaml>}}"
+  local shown_global="<unknown>"
+  local shown_batches="<unknown>"
+  if [[ "$shown_batch" =~ ^[0-9]+$ ]]; then
+    shown_global=$(( nproc * shown_batch ))
+  fi
+  local shown_train_rows
+  shown_train_rows="$(count_csv_rows "${CSV:-${YAML_TRAIN_CSV:-}}")"
+  if [[ "$shown_global" =~ ^[0-9]+$ && "$shown_train_rows" =~ ^[0-9]+$ && "$shown_global" -gt 0 ]]; then
+    shown_batches=$(( (shown_train_rows + shown_global - 1) / shown_global ))
+  fi
+  echo " batch/gpu  : $shown_batch"
+  echo " global_bsz : $shown_global"
+  echo " batches/ep : $shown_batches"
+  echo " epochs     : $shown_epochs"
   echo " ckpt_dir   : ${ckpt_dir#$RIFT_ROOT/}"
   echo " log        : ${log#$RIFT_ROOT/}"
 
