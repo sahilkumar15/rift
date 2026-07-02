@@ -314,6 +314,8 @@ def _harmonic(a, b):
 
 
 
+
+
 def _compute_rift_score_tensor(
     *,
     e0_delta,

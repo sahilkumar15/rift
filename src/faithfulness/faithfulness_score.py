@@ -137,6 +137,8 @@ class FaithfulnessComponents:
 
 
 
+
+
 def compute_rift_score(
     *,
     e0_delta: float, e_nec_delta: float, e_suf_delta: float, delta_floor: float = 0.0,

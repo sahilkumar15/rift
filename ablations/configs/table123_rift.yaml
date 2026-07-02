@@ -11,7 +11,7 @@ data:
   eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
 train:
   gpus: 4,5,6,7
-  batch_size: 64
+  batch_size: 256
   epochs: 30
   workers: 4
   val_every: 2
