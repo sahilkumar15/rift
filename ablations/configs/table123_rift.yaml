@@ -14,8 +14,8 @@ train:
   batch_size: 256
   epochs: 30
   workers: 4
-  val_every: 2
-  val_max_batches: 4
+  val_every: 1
+  val_max_batches: 8
   resume: auto
   wandb_mode: online
   max_items: null
