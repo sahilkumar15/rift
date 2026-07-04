@@ -25,7 +25,7 @@ torch_home: ""
 # ═══════════════════════════════════════════════════════════════════════════════
 experiment:
   root_dir: &experiment_root "experiments"
-  name: &run_name "RIFT_ffpp_h4_full_3"
+  name: &run_name "RIFT_ffpp_h4_full_1"
   group: &run_group "rift_ffpp_c23_full"
   project: &wandb_project "RIFT_ICLR27"
 

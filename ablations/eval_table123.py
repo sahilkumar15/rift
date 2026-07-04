@@ -53,6 +53,24 @@ def fmt(v):
     return v
 
 
+def _make_tqdm(iterable, *, total=None, desc="", unit="it"):
+    """Use tqdm when available; otherwise return the plain iterable."""
+    try:
+        from tqdm.auto import tqdm
+
+        return tqdm(
+            iterable,
+            total=total,
+            desc=desc,
+            unit=unit,
+            dynamic_ncols=True,
+            leave=False,
+            mininterval=1.0,
+        )
+    except Exception:
+        return iterable
+
+
 def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
     from src.explainers.random_explainer import RandomExplainer
     from src.explainers.gradcam_explainer import GradCAMExplainer
@@ -112,7 +130,14 @@ def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
     raise RuntimeError(f"Unknown explainer kind={kind}")
 
 
-def audit_explainer(cfg, adapter, explainer, manifest: Dict[str, Any], device: str) -> Dict[str, Any]:
+def audit_explainer(
+    cfg,
+    adapter,
+    explainer,
+    manifest: Dict[str, Any],
+    device: str,
+    progress_desc: str = "eval",
+) -> Dict[str, Any]:
     import torch
 
     from src.audit.ablation_runner import iter_audit_samples
@@ -128,7 +153,15 @@ def audit_explainer(cfg, adapter, explainer, manifest: Dict[str, Any], device: s
 
     sample_rows = []
 
-    for img, donor, gt in iter_audit_samples(cfg, device=device, n=max_items):
+    sample_iter = iter_audit_samples(cfg, device=device, n=max_items)
+    sample_iter = _make_tqdm(
+        sample_iter,
+        total=max_items,
+        desc=progress_desc,
+        unit="img",
+    )
+
+    for img, donor, gt in sample_iter:
         # Important: mask generation is outside no_grad because Grad-CAM needs gradients.
         mask = explainer.explain(img, adapter, donor=donor)
 
@@ -157,6 +190,13 @@ def audit_explainer(cfg, adapter, explainer, manifest: Dict[str, Any], device: s
             )
 
         sample_rows.append(comp.to_dict())
+
+        if hasattr(sample_iter, "set_postfix") and len(sample_rows) % 10 == 0:
+            sample_iter.set_postfix(
+                n=len(sample_rows),
+                rift=f"{mean(sample_rows, 'rift_score'):.4f}",
+                mask=f"{mean(sample_rows, 'mask_area'):.4f}",
+            )
 
     if not sample_rows:
         raise RuntimeError(
@@ -223,7 +263,14 @@ def run_table(
 
         try:
             ex = make_explainer(row, manifest, device)
-            metrics = audit_explainer(cfg, adapter, ex, manifest, device)
+            metrics = audit_explainer(
+                cfg,
+                adapter,
+                ex,
+                manifest,
+                device,
+                progress_desc=f"{table_key}:ID={row['id']} {row['variant']}",
+            )
 
             out["Nec Δ ↑"] = fmt(metrics["necessity_delta"])
             out["Suf Δ ↑"] = fmt(metrics["sufficiency_delta"])
