@@ -15,6 +15,9 @@ EPOCHS="${EPOCHS:-$EPOCHS_DEFAULT}"
 WORKERS="${WORKERS:-$WORKERS_DEFAULT}"
 WANDB_MODE="${WANDB_MODE:-$WANDB_MODE_DEFAULT}"
 RESUME="${RESUME:-$RESUME_DEFAULT}"
+FAST_REWARD="${FAST_REWARD:-true}"
+SKIP_UNUSED_INTERVENTIONS="${SKIP_UNUSED_INTERVENTIONS:-true}"
+PPO_EPOCHS="${PPO_EPOCHS:-1}"
 
 # Fast-ablation controls.
 TRAIN_MAX_ITEMS="${TRAIN_MAX_ITEMS:-$TRAIN_MAX_ITEMS_DEFAULT}"
@@ -61,12 +64,17 @@ echo " train_max_items  : ${TRAIN_MAX_ITEMS:-FULL}"
 echo " val_max_items    : ${VAL_MAX_ITEMS:-FULL}"
 echo " val_every        : $TRAIN_VAL_EVERY"
 echo " val_max_batches  : $TRAIN_VAL_MAX_BATCHES"
+echo " fast_reward      : $FAST_REWARD"
+echo " skip_unused_intv : $SKIP_UNUSED_INTERVENTIONS"
+echo " ppo_epochs       : $PPO_EPOCHS"
 echo " ckpt_dir         : $ROW_DIR/ckpt"
 echo " wandb            : $WANDB_ENABLED / $WANDB_MODE"
 echo "═══════════════════════════════════════════════════════════"
 
 export PYTHONPATH="$(pwd):${CIFT_ROOT}:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export RIFT_FAST_REWARD="$FAST_REWARD"
+export RIFT_SKIP_UNUSED_INTERVENTIONS="$SKIP_UNUSED_INTERVENTIONS"
 
 CMD=(
   bash scripts/run_rift.sh
@@ -88,6 +96,7 @@ CMD=(
   wandb.name="$RUN_NAME"
   wandb.mode="$WANDB_MODE"
   rl.reward_preset="$REWARD_PRESET"
+  rl.ppo_epochs="$PPO_EPOCHS"
   rl.val_every="$TRAIN_VAL_EVERY"
   rl.val_max_batches="$TRAIN_VAL_MAX_BATCHES"
   data.train_csv="$TRAIN_CSV"

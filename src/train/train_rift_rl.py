@@ -356,6 +356,8 @@ def _make_env(images, donor, adapter, cfg, weights, grid, horizon):
         cache_features=_as_bool(cfg.get("cache_features", True), default=True),
         allow_stop_as_noop=_as_bool(cfg.get("allow_stop", False), default=False),
         forbid_revisit=_as_bool(cfg.get("forbid_revisit", True), default=True),
+        fast_reward=_as_bool(cfg.get("fast_reward", __import__('os').environ.get("RIFT_FAST_REWARD", "1")), default=True),
+        skip_unused_interventions=_as_bool(cfg.get("skip_unused_interventions", __import__('os').environ.get("RIFT_SKIP_UNUSED_INTERVENTIONS", "1")), default=True),
         min_cells=int(cfg.get("min_cells", cfg.get("min_selected_cells", 1))),
     )
 

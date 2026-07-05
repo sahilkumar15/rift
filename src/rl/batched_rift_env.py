@@ -43,6 +43,8 @@ class BatchedRIFTEnv:
         min_cells: int = 1,
         max_cells: Optional[int] = None,
         force_min_cells: bool = True,
+        fast_reward: bool = True,
+        skip_unused_interventions: bool = True,
         **unused_kwargs,
     ):
         assert _HAS_TORCH, "BatchedRIFTEnv requires torch."
@@ -67,6 +69,8 @@ class BatchedRIFTEnv:
             max_cells = self.horizon
         self.max_cells = max(1, int(max_cells or self.horizon))
         self.force_min_cells = bool(force_min_cells)
+        self.fast_reward = bool(fast_reward)
+        self.skip_unused_interventions = bool(skip_unused_interventions)
 
         self.B, _, self.H, self.W = image.shape
         self.n_cells = self.grid * self.grid
@@ -92,13 +96,19 @@ class BatchedRIFTEnv:
         self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
         self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
 
+        need_delta = abs(float(self.reward_fn.get("w_delta", 1.0))) > 0.0
+
         with torch.no_grad():
-            self.e0_gap, self.identity_gap_mode = _identity_gap_tensor(
-                self.adapter,
-                self.image,
-                donor=self.donor,
-            )
-            self.e0_gap = _fix_vec(self.e0_gap, self.B, self.image.device)
+            if need_delta:
+                self.e0_gap, self.identity_gap_mode = _identity_gap_tensor(
+                    self.adapter,
+                    self.image,
+                    donor=self.donor,
+                )
+                self.e0_gap = _fix_vec(self.e0_gap, self.B, self.image.device)
+            else:
+                self.e0_gap = torch.zeros(self.B, device=self.image.device)
+                self.identity_gap_mode = "proxy"
 
             logit = self.adapter.predict_logits(self.image)
             self.e0_logit = _logit_to_evidence(_fix_vec(logit, self.B, self.image.device))
@@ -106,6 +116,8 @@ class BatchedRIFTEnv:
             self.feat0 = None
             if self.cache_features:
                 try:
+                    # Fast after CIFTAdapter patch: this reuses the feature captured
+                    # during predict_logits(self.image), avoiding another CIFT forward.
                     self.feat0 = self.adapter.extract_features(self.image).detach()
                 except Exception:
                     self.feat0 = None
@@ -254,22 +266,58 @@ class BatchedRIFTEnv:
 
         pm = self.current_mask()
 
+        objective = str(self.reward_fn.get("objective", "harmonic")).strip().lower()
+        w_delta = abs(float(self.reward_fn.get("w_delta", 1.0)))
+        w_logit = abs(float(self.reward_fn.get("w_logit", 0.5)))
+        w_dense_delta = abs(float(self.reward_fn.get("w_dense_delta", 0.0)))
+        w_dense_logit = abs(float(self.reward_fn.get("w_dense_logit", 0.0)))
+
+        need_delta = (w_delta > 0.0 or w_dense_delta > 0.0) and _is_true_gap_mode(self.identity_gap_mode)
+        need_logit = w_logit > 0.0 or w_dense_logit > 0.0
+
+        fast_skip = bool(self.fast_reward and self.skip_unused_interventions)
+
+        if fast_skip and objective in ("sufficiency", "sufficiency_only", "suf"):
+            need_nec = False
+            need_suf = True
+        elif fast_skip and objective in ("necessity", "necessity_only", "nec"):
+            need_nec = True
+            need_suf = False
+        else:
+            need_nec = True
+            need_suf = True
+
+        # Defaults for skipped branches. These branches are not used by the
+        # selected objective during fast ablation training.
+        gap_nec = self.e0_gap
+        gap_suf = self.e0_gap
+        l_nec = self.e0_logit
+        l_suf = self.e0_logit
+
         with torch.no_grad():
-            nec_img = apply_necessity(self.image, pm, self.intervention_mode, self.topk_frac)
-            suf_img = apply_sufficiency(self.image, pm, self.intervention_mode, self.topk_frac)
+            if need_nec:
+                nec_img = apply_necessity(self.image, pm, self.intervention_mode, self.topk_frac)
 
-            gap_nec, _ = _identity_gap_tensor(self.adapter, nec_img, donor=self.donor)
-            gap_suf, _ = _identity_gap_tensor(self.adapter, suf_img, donor=self.donor)
+                if need_delta:
+                    gap_nec, _ = _identity_gap_tensor(self.adapter, nec_img, donor=self.donor)
+                    gap_nec = _fix_vec(gap_nec, self.B, self.image.device)
 
-            gap_nec = _fix_vec(gap_nec, self.B, self.image.device)
-            gap_suf = _fix_vec(gap_suf, self.B, self.image.device)
+                if need_logit:
+                    l_nec = _logit_to_evidence(
+                        _fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device)
+                    )
 
-            l_nec = _logit_to_evidence(
-                _fix_vec(self.adapter.predict_logits(nec_img), self.B, self.image.device)
-            )
-            l_suf = _logit_to_evidence(
-                _fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device)
-            )
+            if need_suf:
+                suf_img = apply_sufficiency(self.image, pm, self.intervention_mode, self.topk_frac)
+
+                if need_delta:
+                    gap_suf, _ = _identity_gap_tensor(self.adapter, suf_img, donor=self.donor)
+                    gap_suf = _fix_vec(gap_suf, self.B, self.image.device)
+
+                if need_logit:
+                    l_suf = _logit_to_evidence(
+                        _fix_vec(self.adapter.predict_logits(suf_img), self.B, self.image.device)
+                    )
 
         area = _mask_area_per_sample(pm, self.topk_frac)
 
@@ -294,6 +342,9 @@ class BatchedRIFTEnv:
         info["selected_cells"] = float(selected_cells.float().mean().item())
         info["selected_frac"] = float((selected_cells.float() / float(self.n_cells)).mean().item())
         info["identity_gap_mode"] = str(self.identity_gap_mode)
+        info["fast_reward"] = float(bool(self.fast_reward))
+        info["skipped_nec"] = float(not need_nec)
+        info["skipped_suf"] = float(not need_suf)
 
         return reward, info
 

@@ -96,6 +96,8 @@ class CIFTAdapter:
         self._proxy_warned = False
         self._spatial_feat = None         # filled by a forward hook (WIRE 3)
         self._hook_handle = None
+        self._cached_feature_key = None
+        self._cached_feature = None
 
     # ------------------------------------------------------------------ load
     def load_detector(self) -> "CIFTAdapter":
@@ -195,25 +197,81 @@ class CIFTAdapter:
         return logits, gap
 
     # -------------------------------------------------------------- forward
+
+    def _feature_cache_key(self, x):
+        if not _HAS_TORCH or not torch.is_tensor(x):
+            return None
+        try:
+            return (int(x.data_ptr()), tuple(x.shape), str(x.device), str(x.dtype))
+        except Exception:
+            return None
+
+    def _crop_spatial_feature(self, feat, target_b: int):
+        if not torch.is_tensor(feat):
+            raise RuntimeError(f"Captured CIFT feature is not a tensor: {type(feat)}")
+
+        if feat.shape[0] == target_b:
+            return feat.detach()
+
+        if feat.shape[0] > target_b:
+            return feat[-target_b:].detach().contiguous()
+
+        if feat.shape[0] == 1 and target_b > 1:
+            return feat.repeat(target_b, 1, 1, 1).detach().contiguous()
+
+        raise RuntimeError(
+            f"CIFT feature batch mismatch: feature batch={feat.shape[0]}, "
+            f"image batch={target_b}, feature shape={tuple(feat.shape)}"
+        )
+
+    def _cache_current_spatial_feature(self, x):
+        if not _HAS_TORCH or not torch.is_tensor(x):
+            return
+        feat = getattr(self, "_spatial_feat", None)
+        if feat is None or not torch.is_tensor(feat):
+            return
+        key = self._feature_cache_key(x)
+        if key is None:
+            return
+        try:
+            self._cached_feature_key = key
+            self._cached_feature = self._crop_spatial_feature(feat, int(x.shape[0]))
+        except Exception:
+            self._cached_feature_key = None
+            self._cached_feature = None
+
     def predict_logits(self, x: "Any") -> "Any":
-        """# === WIRE 2 === raw deployed detection logit(s) for image batch x (B,3,H,W)."""
+        """Raw deployed detection logit(s) for image batch x.
+
+        Also caches the spatial feature captured by the forward hook so
+        extract_features(x) can avoid a second identical CIFT forward.
+        """
         if not _HAS_TORCH:
             raise RuntimeError("WIRE 2 needs torch (Katz).")
+
         logits, _ = self._forward(x, donor=None)
+        self._cache_current_spatial_feature(x)
         return logits
 
     def extract_features(self, x: "Any") -> "Any":
-        """# === WIRE 3 === spatial map used by SMC; for policy state/explainers.
+        """Spatial map used by RIFT policy state.
 
-        CIFT may internally concatenate/process source+target streams, so the hook can
-        capture a feature batch larger than the RIFT image batch. RIFT policy state
-        requires feature batch == image/mask batch. Therefore we crop/repeat safely.
+        Fast path:
+          predict_logits(x) already ran CIFT and filled encoder_proj hook.
+          If the same tensor is requested, return the cached feature.
         """
         if not _HAS_TORCH:
             raise RuntimeError("WIRE 3 needs torch (Katz).")
 
         x = x.to(self.device).float()
-        target_b = int(x.shape[0])
+        key = self._feature_cache_key(x)
+
+        if (
+            key is not None
+            and key == getattr(self, "_cached_feature_key", None)
+            and torch.is_tensor(getattr(self, "_cached_feature", None))
+        ):
+            return self._cached_feature
 
         self._spatial_feat = None
 
@@ -222,32 +280,19 @@ class CIFTAdapter:
 
         if self._spatial_feat is None:
             raise RuntimeError(
-                "No spatial feature captured - encoder_proj is Identity for this "
-                "backbone; hook a different layer or use global_pool input."
+                "No spatial feature captured - encoder_proj hook did not fire."
             )
 
-        feat = self._spatial_feat
+        self._cache_current_spatial_feature(x)
 
-        if not torch.is_tensor(feat):
-            raise RuntimeError(f"Captured CIFT feature is not a tensor: {type(feat)}")
+        if (
+            key is not None
+            and key == getattr(self, "_cached_feature_key", None)
+            and torch.is_tensor(getattr(self, "_cached_feature", None))
+        ):
+            return self._cached_feature
 
-        # Expected: feat batch == x batch.
-        if feat.shape[0] == target_b:
-            return feat
-
-        # Common CIFT case: source+target stacked, e.g. feat batch = 2 * image batch.
-        # The analyzed target/hint stream is what RIFT needs; taking the last B is safest.
-        if feat.shape[0] > target_b:
-            return feat[-target_b:].contiguous()
-
-        # Rare case: feature batch smaller than image batch.
-        if feat.shape[0] == 1 and target_b > 1:
-            return feat.repeat(target_b, 1, 1, 1).contiguous()
-
-        raise RuntimeError(
-            f"CIFT feature batch mismatch: feature batch={feat.shape[0]}, "
-            f"image batch={target_b}, feature shape={tuple(feat.shape)}"
-        )
+        return self._crop_spatial_feature(self._spatial_feat, int(x.shape[0]))
 
     # ------------------------------------------------------- identity gap delta
     def identity_gap(
