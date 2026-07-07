@@ -17,6 +17,7 @@ REQUIRED_PRESETS = [
     "generic_logit",
     "delta_no_interv",
     "full_rift",
+    "full_rift_shaped",
     "necessity_only",
     "sufficiency_only",
     "no_sparsity",

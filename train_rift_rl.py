@@ -227,6 +227,19 @@ def _flat_train_cfg(cfg):
                 _cfg_get(cfg, "rl.state_blind", cfg.get("state_blind", False)),
                 default=False,
             ),
+            "fast_reward": _as_bool(
+                _cfg_get(cfg, "rl.fast_reward", cfg.get("fast_reward", None)),
+                default=_as_bool(os.environ.get("RIFT_FAST_REWARD", "1"), default=True),
+            ),
+            "skip_unused_interventions": _as_bool(
+                _cfg_get(cfg, "rl.skip_unused_interventions", cfg.get("skip_unused_interventions", None)),
+                default=_as_bool(os.environ.get("RIFT_SKIP_UNUSED_INTERVENTIONS", "1"), default=True),
+            ),
+            "max_cells": _cfg_get(cfg, "rl.max_cells", cfg.get("max_cells", None)),
+            "force_min_cells": _as_bool(
+                _cfg_get(cfg, "rl.force_min_cells", cfg.get("force_min_cells", True)),
+                default=True,
+            ),
             "min_evidence": _cfg_get(
                 cfg,
                 "rl.min_evidence",
@@ -267,6 +280,15 @@ def _flat_train_cfg(cfg):
                 "rift-epoch={epoch:02d}",
             ),
             "save_epochs": _cfg_get(cfg, "checkpoint.save_epochs", []),
+            "keep_last_n": _cfg_get(
+                cfg,
+                "checkpoint.keep_last_n",
+                _cfg_get(cfg, "checkpoint.max_keep", cfg.get("keep_last_n", 5)),
+            ),
+            "prune_ckpt": _as_bool(
+                _cfg_get(cfg, "checkpoint.prune_ckpt", cfg.get("prune_ckpt", True)),
+                default=True,
+            ),
 
             "early_stopping_monitor": _cfg_get(cfg, "early_stopping.monitor", monitor),
             "early_stopping_mode": _cfg_get(
@@ -282,6 +304,12 @@ def _flat_train_cfg(cfg):
             ),
 
             "resume": _cfg_get(cfg, "resume", cfg.get("resume", "auto")),
+
+            # Optional policy-only warm start. This loads policy weights only,
+
+            # keeps optimizer fresh, and starts epoch from 0.
+
+            "init_policy": _cfg_get(cfg, "init_policy", _cfg_get(cfg, "rl.init_policy", None)),
 
             "wandb": _wandb_enabled(cfg),
             "wandb_project": _cfg_get(

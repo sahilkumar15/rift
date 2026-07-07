@@ -1,16 +1,3 @@
-# Path: src/utils/checkpoint_manager.py
-"""Top-k + latest/last + selected-epoch checkpointing with robust resume.
-
-Supports CIFT-style YAML keys:
-  checkpoint.monitor
-  checkpoint.mode
-  checkpoint.save_top_k
-  checkpoint.save_last
-  checkpoint.best_filename
-  checkpoint.every_filename
-  checkpoint.save_epochs
-"""
-
 from __future__ import annotations
 
 import os
@@ -19,7 +6,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     import torch
-
     _HAS_TORCH = True
 except Exception:
     _HAS_TORCH = False
@@ -28,25 +14,14 @@ except Exception:
 def _to_plain(obj: Any):
     if obj is None:
         return None
-
     if isinstance(obj, (str, int, float, bool)):
         return obj
-
     if isinstance(obj, dict):
         return {str(k): _to_plain(v) for k, v in obj.items()}
-
     if isinstance(obj, (list, tuple)):
         return [_to_plain(v) for v in obj]
-
-    if hasattr(obj, "items"):
-        try:
-            return {str(k): _to_plain(v) for k, v in obj.items()}
-        except Exception:
-            pass
-
     if _HAS_TORCH and torch.is_tensor(obj):
         return obj
-
     return obj
 
 
@@ -54,45 +29,63 @@ def _safe_state(state: Dict):
     return {str(k): _to_plain(v) for k, v in state.items()}
 
 
-def _safe_metric_name(name: str) -> str:
-    name = str(name or "metric")
-    name = name.replace("/", "_")
-    return re.sub(r"[^A-Za-z0-9_.=-]+", "_", name)
-
-
 def _format_filename(template: str, *, epoch: int, monitor: str, score: Optional[float]) -> str:
-    metric_name = _safe_metric_name(monitor)
-
     kwargs = {
-        "epoch": epoch,
-        "monitor": metric_name,
+        "epoch": int(epoch),
+        "monitor": str(monitor).replace("/", "_"),
         "score": float(score) if score is not None else 0.0,
     }
-
     try:
         name = str(template).format(**kwargs)
     except Exception:
         name = f"rift-epoch={epoch:02d}"
-
-    if not os.path.splitext(name)[1]:
+    if not name.endswith(".pth"):
         name += ".pth"
-
     return name
 
 
 def _parse_epochs(save_epochs: Optional[Iterable]) -> set[int]:
-    if not save_epochs:
-        return set()
-
     out = set()
-
+    if not save_epochs:
+        return out
     for e in save_epochs:
         try:
             out.add(int(e))
         except Exception:
             pass
-
     return out
+
+
+def _epoch_num(path: str) -> int:
+    name = os.path.basename(str(path))
+    m = re.search(r"epoch=([0-9]+)", name)
+    if not m:
+        return -1
+    try:
+        return int(m.group(1))
+    except Exception:
+        return -1
+
+
+def _score_num(path: str):
+    name = os.path.basename(str(path))
+    m = re.search(r"score=([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)", name)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
+def _safe_remove(path: str) -> bool:
+    try:
+        if os.path.exists(path) and not os.path.islink(path):
+            os.remove(path)
+            return True
+    except Exception:
+        return False
+    return False
 
 
 class CheckpointManager:
@@ -104,9 +97,11 @@ class CheckpointManager:
         top_k=3,
         interval=1,
         save_last=True,
-        best_filename="rift-best-score-epoch={epoch:02d}",
+        best_filename="rift-best-score={score:.4f}-epoch={epoch:02d}",
         every_filename="rift-epoch={epoch:02d}",
         save_epochs=None,
+        keep_last_n=3,
+        prune_ckpt=True,
     ):
         self.out_dir = str(out_dir)
         os.makedirs(self.out_dir, exist_ok=True)
@@ -116,20 +111,99 @@ class CheckpointManager:
         self.top_k = int(top_k if top_k is not None else 3)
         self.interval = int(interval if interval is not None else 1)
         self.save_last = bool(save_last)
-        self.best_filename = best_filename or "rift-best-score-epoch={epoch:02d}"
+        self.best_filename = best_filename or "rift-best-score={score:.4f}-epoch={epoch:02d}"
         self.every_filename = every_filename or "rift-epoch={epoch:02d}"
         self.save_epochs = _parse_epochs(save_epochs)
+
+        if keep_last_n in (None, "", "none", "None"):
+            self.keep_last_n = None
+        else:
+            self.keep_last_n = int(keep_last_n)
+
+        self.prune_ckpt = bool(prune_ckpt)
         self.best: List = []
 
     def _should_save_interval(self, epoch_num: int) -> bool:
         if epoch_num in self.save_epochs:
             return True
-
         return bool(self.interval and epoch_num % self.interval == 0)
+
+    def _score_files(self):
+        files = []
+        for name in os.listdir(self.out_dir):
+            if not name.endswith(".pth"):
+                continue
+            if name in ("latest.pth", "last.pth"):
+                continue
+            path = os.path.join(self.out_dir, name)
+            if os.path.islink(path):
+                continue
+            score = _score_num(path)
+            if score is not None:
+                files.append((score, path))
+        files.sort(key=lambda x: x[0], reverse=(self.mode == "max"))
+        return files
+
+    def _epoch_files(self):
+        files = []
+        for name in os.listdir(self.out_dir):
+            if not name.endswith(".pth"):
+                continue
+            if name in ("latest.pth", "last.pth"):
+                continue
+            if not name.startswith("rift-epoch="):
+                continue
+            path = os.path.join(self.out_dir, name)
+            if os.path.islink(path):
+                continue
+            ep = _epoch_num(path)
+            if ep >= 0:
+                files.append(path)
+        files.sort(key=lambda p: (_epoch_num(p), os.path.getmtime(p)))
+        return files
+
+    def _prune_score_checkpoints(self):
+        if not self.prune_ckpt:
+            return []
+        if self.top_k < 0:
+            return []
+
+        files = self._score_files()
+        keep = set(path for _, path in files[: max(0, self.top_k)])
+        removed = []
+
+        for _, path in files:
+            if path not in keep and _safe_remove(path):
+                removed.append(path)
+
+        self.best = files[: max(0, self.top_k)]
+        return removed
+
+    def _prune_epoch_checkpoints(self):
+        if not self.prune_ckpt:
+            return []
+        if self.keep_last_n is None or self.keep_last_n < 0:
+            return []
+
+        files = self._epoch_files()
+        keep = set(files[-int(self.keep_last_n):])
+        removed = []
+
+        for path in files:
+            if path not in keep and _safe_remove(path):
+                removed.append(path)
+
+        return removed
+
+    def _prune_all_checkpoints(self):
+        removed = []
+        removed.extend(self._prune_score_checkpoints())
+        removed.extend(self._prune_epoch_checkpoints())
+        return removed
 
     def save(self, state: Dict, epoch: int, metrics: Dict):
         if not _HAS_TORCH:
-            raise RuntimeError("torch needed to save ckpt.")
+            raise RuntimeError("torch needed to save checkpoint.")
 
         state = _safe_state(state)
         epoch_num = int(epoch) + 1
@@ -144,50 +218,40 @@ class CheckpointManager:
             paths["last"] = last
 
         if self._should_save_interval(epoch_num):
-            filename = _format_filename(
+            ep_name = _format_filename(
                 self.every_filename,
                 epoch=epoch_num,
                 monitor=self.monitor,
                 score=None,
             )
-            p = os.path.join(self.out_dir, filename)
-            torch.save(state, p)
-            paths["interval"] = p
+            ep_path = os.path.join(self.out_dir, ep_name)
+            torch.save(state, ep_path)
+            paths["interval"] = ep_path
 
         score = metrics.get(self.monitor)
-
         if score is None and "/" in self.monitor:
             score = metrics.get(self.monitor.split("/", 1)[-1])
 
         if score is not None and self.top_k != 0:
             score = float(score)
-
-            filename = _format_filename(
+            best_name = _format_filename(
                 self.best_filename,
                 epoch=epoch_num,
                 monitor=self.monitor,
                 score=score,
             )
+            best_path = os.path.join(self.out_dir, best_name)
+            torch.save(state, best_path)
+            paths["best_candidate"] = best_path
 
-            p = os.path.join(self.out_dir, filename)
-            torch.save(state, p)
+        removed = self._prune_all_checkpoints()
+        if removed:
+            paths["pruned"] = removed
 
-            if self.top_k < 0:
-                paths["best"] = p
-                return paths
-
-            self.best.append((score, p))
-            self.best.sort(key=lambda x: x[0], reverse=(self.mode == "max"))
-
-            for _, old in self.best[self.top_k :]:
-                if os.path.exists(old):
-                    os.remove(old)
-
-            self.best = self.best[: self.top_k]
-
-            if self.best:
-                paths["best"] = self.best[0][1]
-                paths["top_k"] = [p for _, p in self.best]
+        score_files = self._score_files()
+        if score_files:
+            paths["best"] = score_files[0][1]
+            paths["top_k"] = [p for _, p in score_files[: max(0, self.top_k)]]
 
         return paths
 

@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+
+
+# cd /scratch/sahil/projects/img_deepfake/code/rift
+
+# ROW=full_h4 \
+# GPUS=4,5,6,7 \
+# BATCH=256 \
+# EPOCHS=40 \
+# PPO_EPOCHS=3 \
+# FAST_REWARD=false \
+# SKIP_UNUSED_INTERVENTIONS=false \
+
+# RIFT_EXTRA_OVERRIDES="checkpoint.save_top_k=3 checkpoint.keep_last_n=3 checkpoint.prune_ckpt=true rl.lr=1e-4 rl.entropy_coef=0.03 early_stopping.patience=10 early_stopping.min_delta=0.001" \
+# bash ablations/scripts/train_table123_row.sh
+
+
+
+
 ABLCFG="${ABLCFG:-ablations/configs/table123_rift.yaml}"
 ROW="${ROW:?ERROR: set ROW=<policy_key>, e.g. ROW=full_h4}"
 
@@ -18,6 +37,7 @@ RESUME="${RESUME:-$RESUME_DEFAULT}"
 FAST_REWARD="${FAST_REWARD:-true}"
 SKIP_UNUSED_INTERVENTIONS="${SKIP_UNUSED_INTERVENTIONS:-true}"
 PPO_EPOCHS="${PPO_EPOCHS:-1}"
+RIFT_EXTRA_OVERRIDES="${RIFT_EXTRA_OVERRIDES:-}"
 
 # Fast-ablation controls.
 TRAIN_MAX_ITEMS="${TRAIN_MAX_ITEMS:-$TRAIN_MAX_ITEMS_DEFAULT}"
@@ -107,6 +127,12 @@ CMD=(
   detector.cift_config="$CIFT_CONFIG"
   resume="$RESUME"
 )
+
+if [[ -n "$RIFT_EXTRA_OVERRIDES" ]]; then
+  # shellcheck disable=SC2206
+  _EXTRA_OV_ARR=( $RIFT_EXTRA_OVERRIDES )
+  CMD+=("${_EXTRA_OV_ARR[@]}")
+fi
 
 # TRAIN_MAX_ITEMS / VAL_MAX_ITEMS:
 #   unset/default -> use YAML ablation default

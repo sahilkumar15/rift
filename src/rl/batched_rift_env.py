@@ -339,8 +339,42 @@ class BatchedRIFTEnv:
         }
 
         selected_cells = self.mask[:, 0].flatten(1).sum(dim=1)
+        flat_mask = self.mask[:, 0].flatten(1).float()
+        p_cell = flat_mask.mean(dim=0)
+        active = p_cell > 0
+        denom = p_cell.sum().clamp_min(1e-8)
+        q = p_cell / denom
+
+        rows = torch.arange(self.grid, device=self.image.device).repeat_interleave(self.grid).float()
+        cols = torch.arange(self.grid, device=self.image.device).repeat(self.grid).float()
+
+        try:
+            unique_mask_frac = float(torch.unique(flat_mask.detach().cpu(), dim=0).shape[0] / max(1, self.B))
+        except Exception:
+            unique_mask_frac = 0.0
+
         info["selected_cells"] = float(selected_cells.float().mean().item())
+        info["selected_cells_std"] = float(selected_cells.float().std(unbiased=False).item())
+        info["selected_cells_min"] = float(selected_cells.float().min().item())
+        info["selected_cells_max"] = float(selected_cells.float().max().item())
         info["selected_frac"] = float((selected_cells.float() / float(self.n_cells)).mean().item())
+        info["stopped_frac"] = float((self.last_action == self.stop_action).float().mean().item())
+
+        # Validity flags: logit is always available; true Δ is only available
+        # in donor/identity-gap audit mode.
+        info["valid_frac_delta"] = float(_is_true_gap_mode(self.identity_gap_mode))
+        info["valid_frac_logit"] = 1.0
+
+        info["mask_cell_entropy"] = float(
+            (-(q * torch.log(q + 1e-8)).sum() /
+             torch.log(torch.tensor(float(max(2, self.n_cells)), device=self.image.device))).item()
+        )
+        info["mask_cell_max_frac"] = float(p_cell.max().item())
+        info["active_cell_frac"] = float(active.float().mean().item())
+        info["unique_mask_frac"] = unique_mask_frac
+        info["mask_center_row"] = float((q * rows).sum().item())
+        info["mask_center_col"] = float((q * cols).sum().item())
+
         info["identity_gap_mode"] = str(self.identity_gap_mode)
         info["fast_reward"] = float(bool(self.fast_reward))
         info["skipped_nec"] = float(not need_nec)
@@ -447,8 +481,8 @@ def _compute_rift_score_tensor(
         "w_identity": 0.3,
         "w_perceptual": 0.2,
         "w_plausibility": 0.0,
-        "w_dense_delta": 0.25,
-        "w_dense_logit": 0.10,
+        "w_dense_delta": 0.0,
+        "w_dense_logit": 0.0,
         "w_empty": 0.25,
         "objective": "harmonic",
     }

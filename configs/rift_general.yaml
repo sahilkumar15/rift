@@ -234,6 +234,12 @@ checkpoint:
   save_every:       1
   save_epochs:      []
 
+  # Keep checkpoint folders small.
+  # latest.pth and last.pth are always preserved.
+  # Other .pth files are pruned so only the newest N remain.
+  keep_last_n:      3
+  prune_ckpt:       true
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # EARLY STOPPING
 # ═══════════════════════════════════════════════════════════════════════════════

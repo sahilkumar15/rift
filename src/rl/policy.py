@@ -50,9 +50,23 @@ if _HAS_TORCH:
             )
 
             self.feat_pool = nn.AdaptiveAvgPool2d(1)
+            self.spatial_pool = nn.AdaptiveAvgPool2d((self.grid, self.grid))
             self.feat_enc = nn.Sequential(
                 nn.Linear(self.feat_dim, self.hidden),
                 nn.ReLU(inplace=True),
+            )
+
+            # Spatial action head: the old policy globally pooled the CIFT map,
+            # so it had weak cell-local signal. This head keeps an 8x8 grid map
+            # and scores each action cell using local evidence + global context.
+            self.cell_feat_enc = nn.Sequential(
+                nn.Conv2d(self.feat_dim, self.hidden, kernel_size=1),
+                nn.ReLU(inplace=True),
+            )
+            self.cell_pi = nn.Sequential(
+                nn.Linear(self.hidden * 2, self.hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.hidden, 1),
             )
 
             trunk_in = self.hidden + self.hidden + self.scalar_dim
@@ -128,6 +142,38 @@ if _HAS_TORCH:
             sc = torch.stack([confidence, step_idx, last_action, selected_frac], dim=1)
             return self.scalar_enc(sc)
 
+        def _prepare_spatial_feat(self, feat, batch_size, device):
+            if feat is None or not torch.is_tensor(feat):
+                return torch.zeros(batch_size, self.feat_dim, self.grid, self.grid, device=device, dtype=torch.float32)
+
+            feat = feat.to(device=device, dtype=torch.float32)
+
+            if feat.dim() == 1:
+                feat = feat.view(1, -1, 1, 1)
+            elif feat.dim() == 2:
+                feat = feat[:, :, None, None]
+            elif feat.dim() == 3:
+                if feat.shape[0] == batch_size:
+                    feat = feat.unsqueeze(-1)
+                else:
+                    feat = feat.unsqueeze(0)
+            elif feat.dim() > 4:
+                feat = feat.flatten(2).unsqueeze(-1)
+
+            feat = self._match_batch(feat, batch_size)
+
+            c = int(feat.shape[1])
+            if c < self.feat_dim:
+                pad = torch.zeros(
+                    feat.shape[0], self.feat_dim - c, *feat.shape[2:],
+                    device=feat.device, dtype=feat.dtype
+                )
+                feat = torch.cat([feat, pad], dim=1)
+            elif c > self.feat_dim:
+                feat = feat[:, : self.feat_dim]
+
+            return self.spatial_pool(feat)
+
         def _prepare_feat_vector(self, feat, batch_size, device):
             if feat is None or not torch.is_tensor(feat):
                 return torch.zeros(batch_size, self.feat_dim, device=device, dtype=torch.float32)
@@ -179,7 +225,25 @@ if _HAS_TORCH:
 
         def forward(self, state):
             h = self._encode(state)
-            return self.pi(h), self.v(h)
+            logits_global = self.pi(h)
+
+            try:
+                batch_size = self._batch_size(state)
+                device = state["current_mask"].device
+
+                sf = self._prepare_spatial_feat(state.get("feat"), batch_size, device)
+                cell_h = self.cell_feat_enc(sf).flatten(2).transpose(1, 2)
+
+                g = h.unsqueeze(1).expand(-1, self.grid * self.grid, -1)
+                cell_logits = self.cell_pi(torch.cat([cell_h, g], dim=-1)).squeeze(-1)
+
+                # 64 cell logits + STOP logit
+                logits = torch.cat([cell_logits, logits_global[:, -1:]], dim=1)
+            except Exception:
+                # Safety fallback: never crash training because of a feature-shape edge case.
+                logits = logits_global
+
+            return logits, self.v(h)
 
         @torch.no_grad()
         def act(self, state, deterministic=False):

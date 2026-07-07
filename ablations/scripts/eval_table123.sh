@@ -5,6 +5,7 @@ ABLCFG="${ABLCFG:-ablations/configs/table123_rift.yaml}"
 GPU="${GPU:-4}"
 TABLES="${TABLES:-table1_component,table2_objective,table3_horizon}"
 MAX_ITEMS="${MAX_ITEMS:-}"
+SKIP_OK="${SKIP_OK:-0}"
 
 python ablations/patch_for_ablations.py
 
@@ -18,6 +19,10 @@ CMD=(python -m ablations.eval_table123 --ablation-config "$ABLCFG" --tables "$TA
 
 if [[ -n "$MAX_ITEMS" ]]; then
   CMD+=(--max-items "$MAX_ITEMS")
+fi
+
+if [[ "$SKIP_OK" == "1" || "$SKIP_OK" == "true" ]]; then
+  CMD+=(--skip-ok-existing)
 fi
 
 echo "═══════════════════════════════════════════════════════════"

@@ -17,6 +17,12 @@ _BASE_GUARDS = {
     "sparsity_mode": "linear",
     "area_lo": 0.02,
     "area_hi": 0.35,
+    # Dense shaping must be explicit. The paper/eval RIFT score uses only
+    # harmonic necessity-sufficiency plus penalties; keeping dense terms
+    # silently on makes train-val scores look good while final eval is weak.
+    "w_dense_delta": 0.0,
+    "w_dense_logit": 0.0,
+    "w_empty": 0.25,
 }
 
 REWARD_PRESETS = {
@@ -44,6 +50,16 @@ REWARD_PRESETS = {
         "w_delta": 1.0, "w_logit": 0.5, "w_sparsity": 0.3,
         "w_identity": 0.0, "w_perceptual": 0.0, "w_plausibility": 0.0,
         "objective": "harmonic", **_BASE_GUARDS,
+    },
+    # Optional exploration/stability preset. Do not use as the headline paper
+    # row unless dense terms are reported separately.
+    "full_rift_shaped": {
+        "w_delta": 1.0, "w_logit": 0.5, "w_sparsity": 0.3,
+        "w_identity": 0.0, "w_perceptual": 0.0, "w_plausibility": 0.0,
+        "objective": "harmonic",
+        "w_dense_delta": 0.10,
+        "w_dense_logit": 0.05,
+        **_BASE_GUARDS,
     },
     "necessity_only": {
         "w_delta": 1.0, "w_logit": 0.5, "w_sparsity": 0.3,

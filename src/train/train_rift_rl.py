@@ -359,6 +359,8 @@ def _make_env(images, donor, adapter, cfg, weights, grid, horizon):
         fast_reward=_as_bool(cfg.get("fast_reward", __import__('os').environ.get("RIFT_FAST_REWARD", "1")), default=True),
         skip_unused_interventions=_as_bool(cfg.get("skip_unused_interventions", __import__('os').environ.get("RIFT_SKIP_UNUSED_INTERVENTIONS", "1")), default=True),
         min_cells=int(cfg.get("min_cells", cfg.get("min_selected_cells", 1))),
+        max_cells=cfg.get("max_cells", None),
+        force_min_cells=_as_bool(cfg.get("force_min_cells", True), default=True),
     )
 
 
@@ -573,6 +575,8 @@ def train(cfg, adapter, dataloaders):
             best_filename=cfg.get("best_filename", "rift-best-score-epoch={epoch:02d}"),
             every_filename=cfg.get("every_filename", "rift-epoch={epoch:02d}"),
             save_epochs=cfg.get("save_epochs", []),
+            keep_last_n=cfg.get("keep_last_n", None),
+            prune_ckpt=cfg.get("prune_ckpt", True),
         )
 
         wb = WandbLogger(

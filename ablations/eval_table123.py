@@ -18,6 +18,36 @@ def tick(v) -> str:
     return TICK if bool(v) else CROSS
 
 
+def read_existing_csv(path: str) -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", newline="") as f:
+        out = {}
+        for r in csv.DictReader(f):
+            out[str(r.get("ID", ""))] = dict(r)
+        return out
+
+
+def _count_csv_rows(path: str) -> int:
+    try:
+        with open(path, "rb") as f:
+            return max(0, sum(1 for _ in f) - 1)
+    except Exception:
+        return 0
+
+
+def _parse_max_items_arg(v, *, eval_csv: str | None = None):
+    if v is None:
+        return None
+    ss = str(v).strip()
+    if ss.lower() in ("full", "all"):
+        n = _count_csv_rows(eval_csv or "")
+        return n if n > 0 else None
+    if ss.lower() in ("", "none", "null", "0"):
+        return None
+    return int(ss)
+
+
 def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
@@ -253,13 +283,29 @@ def run_table(
     cfg,
     adapter,
     device: str,
+    *,
+    existing: Dict[str, Dict[str, Any]] | None = None,
+    skip_ok_existing: bool = False,
 ) -> List[Dict[str, Any]]:
     rows_out = []
+    existing = existing or {}
+    target_n = int(manifest.get("eval", {}).get("max_items", 0) or 0)
 
     for row in table_spec["rows"]:
         print(f"\n[{table_key}] ID={row['id']} {row['variant']}", flush=True)
 
         out = row_prefix(row)
+
+        old = existing.get(str(row["id"]))
+        if skip_ok_existing and old and str(old.get("status", "")).lower() == "ok":
+            try:
+                old_n = int(float(old.get("n", 0)))
+            except Exception:
+                old_n = 0
+            if target_n <= 0 or old_n >= target_n:
+                print(f"  SKIP existing ok n={old_n}", flush=True)
+                rows_out.append(old)
+                continue
 
         try:
             ex = make_explainer(row, manifest, device)
@@ -305,13 +351,15 @@ def main() -> int:
     ap.add_argument("--ablation-config", default="ablations/configs/table123_rift.yaml")
     ap.add_argument("--tables", default="table1_component,table2_objective,table3_horizon")
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--max-items", type=int, default=None)
+    ap.add_argument("--max-items", default=None)
+    ap.add_argument("--skip-ok-existing", action="store_true")
     args = ap.parse_args()
 
     manifest = load_manifest(args.ablation_config)
 
-    if args.max_items is not None:
-        manifest["eval"]["max_items"] = int(args.max_items)
+    parsed_max = _parse_max_items_arg(args.max_items, eval_csv=manifest.get("data", {}).get("eval_csv"))
+    if parsed_max is not None:
+        manifest["eval"]["max_items"] = int(parsed_max)
 
     seed = int(manifest.get("eval", {}).get("seed", 3407))
     random.seed(seed)
@@ -373,9 +421,19 @@ def main() -> int:
 
         print(f"\n{'=' * 80}\n{key}\n{'=' * 80}", flush=True)
 
-        rows = run_table(key, spec, manifest, cfg, adapter, args.device)
-
         out_path = os.path.join(out_dir, spec["filename"])
+        existing = read_existing_csv(out_path)
+        rows = run_table(
+            key,
+            spec,
+            manifest,
+            cfg,
+            adapter,
+            args.device,
+            existing=existing,
+            skip_ok_existing=bool(args.skip_ok_existing),
+        )
+
         write_csv(out_path, rows)
 
         print(f"[wrote] {out_path}", flush=True)
@@ -387,6 +445,26 @@ def main() -> int:
     write_csv(combined_path, combined)
 
     print(f"\n[done] combined: {combined_path}", flush=True)
+
+    import time
+    history_path = os.path.join(out_dir, "metrics_history.csv")
+    hist_rows = []
+    run_ts = int(time.time())
+    for r in combined:
+        hist_rows.append({"run_ts": run_ts, "max_items": manifest["eval"].get("max_items"), **r})
+    if hist_rows:
+        exists = os.path.exists(history_path)
+        cols = []
+        for r in hist_rows:
+            for k in r:
+                if k not in cols:
+                    cols.append(k)
+        with open(history_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            if not exists:
+                w.writeheader()
+            w.writerows(hist_rows)
+        print(f"[history] appended: {history_path}", flush=True)
 
     failed = [r for r in combined if r.get("status") != "ok"]
 
