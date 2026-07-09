@@ -165,3 +165,4 @@ echo "" >> "$ROW_DIR/logs/command.sh"
 "${CMD[@]}" 2>&1 | tee "$ROW_DIR/logs/train.log"
 
 echo "[done] row=$ROW"
+exit 0
