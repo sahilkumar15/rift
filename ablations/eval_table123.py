@@ -5,13 +5,14 @@ import argparse
 import csv
 import os
 import random
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ablations.lib.manifest import load_manifest, policy_ckpt
 from ablations.lib.explainers import CausalSelectExplainer, PolicyExplainer, sigmoid_mean, gap_value
 
 TICK = "✓"
 CROSS = "✗"
+FAKE_LABELS = {"1", "fake", "forged", "True", "true"}
 
 
 def tick(v) -> str:
@@ -28,7 +29,17 @@ def read_existing_csv(path: str) -> Dict[str, Dict[str, Any]]:
         return out
 
 
-def _count_csv_rows(path: str) -> int:
+def _count_eligible_csv_rows(path: str) -> int:
+    """Count exactly the fake/forged rows used by iter_audit_samples()."""
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames and "label" in reader.fieldnames:
+                return sum(1 for r in reader if str(r.get("label", "1")).strip() in FAKE_LABELS)
+    except Exception:
+        pass
     try:
         with open(path, "rb") as f:
             return max(0, sum(1 for _ in f) - 1)
@@ -36,26 +47,40 @@ def _count_csv_rows(path: str) -> int:
         return 0
 
 
-def _parse_max_items_arg(v, *, eval_csv: str | None = None):
+def _parse_max_items_arg(v, *, eval_csv: str | None = None, yaml_value: Any = None) -> Optional[int]:
+    """Return an integer global cap. full/all/auto means all eligible fake rows."""
+    if v is None:
+        v = yaml_value
     if v is None:
         return None
+
     ss = str(v).strip()
-    if ss.lower() in ("full", "all"):
-        n = _count_csv_rows(eval_csv or "")
+    low = ss.lower()
+    if low in ("full", "all", "auto"):
+        n = _count_eligible_csv_rows(eval_csv or "")
         return n if n > 0 else None
-    if ss.lower() in ("", "none", "null", "0"):
+    if low in ("", "none", "null"):
         return None
-    return int(ss)
+    if low == "0":
+        n = _count_eligible_csv_rows(eval_csv or "")
+        return n if n > 0 else None
+    return int(float(ss))
+
+
+def _shard_total(max_items: int, shard_id: int, shard_count: int) -> int:
+    if shard_count <= 1:
+        return int(max_items)
+    if max_items <= 0:
+        return 0
+    return max(0, (max_items - 1 - shard_id) // shard_count + 1)
 
 
 def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
     if not rows:
         return
 
-    cols = []
-
+    cols: List[str] = []
     for r in rows:
         for k in r:
             if k not in cols:
@@ -83,19 +108,24 @@ def fmt(v):
     return v
 
 
-def _make_tqdm(iterable, *, total=None, desc="", unit="it"):
-    """Use tqdm when available; otherwise return the plain iterable."""
+def _make_tqdm(iterable, *, total=None, desc="", unit="it", position=0):
+    """Real tqdm progress bar only."""
     try:
-        from tqdm.auto import tqdm
+        import sys
+        from tqdm import tqdm
 
         return tqdm(
             iterable,
             total=total,
             desc=desc,
             unit=unit,
+            position=position,
             dynamic_ncols=True,
-            leave=False,
+            leave=True,
             mininterval=1.0,
+            miniters=1,
+            file=sys.stdout,
+            disable=False,
         )
     except Exception:
         return iterable
@@ -121,7 +151,6 @@ def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
 
     if kind == "causal_select":
         base_name = row.get("base")
-
         if base_name == "gradcam":
             base = GradCAMExplainer(target_class=1)
         elif base_name == "cift_delta":
@@ -179,20 +208,23 @@ def audit_explainer(
     mode = str(ev.get("intervention_mode", "blur"))
     topk = float(ev.get("topk_frac", 0.12))
     max_items = int(ev.get("max_items", 512))
+    shard_id = int(ev.get("shard_id", 0) or 0)
+    shard_count = int(ev.get("shard_count", 1) or 1)
     weights = get_reward_weights("full_rift")
 
     sample_rows = []
 
+    shard_eval_total = _shard_total(max_items, shard_id, shard_count)
     sample_iter = iter_audit_samples(cfg, device=device, n=max_items)
     sample_iter = _make_tqdm(
         sample_iter,
-        total=max_items,
-        desc=progress_desc,
+        total=shard_eval_total,
+        desc=f"{progress_desc} shard={shard_id}/{shard_count}",
         unit="img",
+        position=shard_id,
     )
 
     for img, donor, gt in sample_iter:
-        # Important: mask generation is outside no_grad because Grad-CAM needs gradients.
         mask = explainer.explain(img, adapter, donor=donor)
 
         with torch.no_grad():
@@ -223,15 +255,15 @@ def audit_explainer(
 
         if hasattr(sample_iter, "set_postfix") and len(sample_rows) % 10 == 0:
             sample_iter.set_postfix(
-                n=len(sample_rows),
                 rift=f"{mean(sample_rows, 'rift_score'):.4f}",
                 mask=f"{mean(sample_rows, 'mask_area'):.4f}",
+                refresh=True,
             )
 
     if not sample_rows:
         raise RuntimeError(
             "No samples were evaluated. Check dataset.split_csv, donor_path/source_ref_path, "
-            "detector.strict_identity_gap, and MAX_ITEMS."
+            "detector.strict_identity_gap, shard_id/shard_count, and MAX_ITEMS."
         )
 
     keys = [
@@ -247,7 +279,6 @@ def audit_explainer(
 
     out = {k: mean(sample_rows, k) for k in keys}
     out["n"] = len(sample_rows)
-
     return out
 
 
@@ -289,7 +320,11 @@ def run_table(
 ) -> List[Dict[str, Any]]:
     rows_out = []
     existing = existing or {}
-    target_n = int(manifest.get("eval", {}).get("max_items", 0) or 0)
+    target_n = _shard_total(
+        int(manifest.get("eval", {}).get("max_items", 0) or 0),
+        int(manifest.get("eval", {}).get("shard_id", 0) or 0),
+        int(manifest.get("eval", {}).get("shard_count", 1) or 1),
+    )
 
     for row in table_spec["rows"]:
         print(f"\n[{table_key}] ID={row['id']} {row['variant']}", flush=True)
@@ -338,7 +373,6 @@ def run_table(
             out["n"] = 0
             out["status"] = "FAILED"
             out["error"] = f"{type(e).__name__}: {e}"
-
             print(f"  FAILED: {out['error']}", flush=True)
 
         rows_out.append(out)
@@ -351,27 +385,44 @@ def main() -> int:
     ap.add_argument("--ablation-config", default="ablations/configs/table123_rift.yaml")
     ap.add_argument("--tables", default="table1_component,table2_objective,table3_horizon")
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--max-items", default=None)
+    ap.add_argument("--max-items", default=None, help="integer, or full/all/auto for all eligible fake validation rows")
     ap.add_argument("--skip-ok-existing", action="store_true")
+    ap.add_argument("--shard-id", type=int, default=int(os.environ.get("SHARD_ID", 0)))
+    ap.add_argument("--shard-count", type=int, default=int(os.environ.get("SHARD_COUNT", 1)))
+    ap.add_argument("--output-dir", default=None, help="override manifest eval.output_dir; used by parallel shards")
     args = ap.parse_args()
 
-    manifest = load_manifest(args.ablation_config)
+    if args.shard_count < 1:
+        raise RuntimeError(f"Invalid shard_count={args.shard_count}")
+    if args.shard_id < 0 or args.shard_id >= args.shard_count:
+        raise RuntimeError(f"Invalid shard_id={args.shard_id}, shard_count={args.shard_count}")
 
-    parsed_max = _parse_max_items_arg(args.max_items, eval_csv=manifest.get("data", {}).get("eval_csv"))
+    manifest = load_manifest(args.ablation_config)
+    manifest.setdefault("eval", {})
+
+    parsed_max = _parse_max_items_arg(
+        args.max_items,
+        eval_csv=manifest.get("data", {}).get("eval_csv"),
+        yaml_value=manifest.get("eval", {}).get("max_items", 512),
+    )
     if parsed_max is not None:
         manifest["eval"]["max_items"] = int(parsed_max)
 
+    if args.output_dir:
+        manifest["eval"]["output_dir"] = args.output_dir
+
+    manifest["eval"]["shard_id"] = int(args.shard_id)
+    manifest["eval"]["shard_count"] = int(args.shard_count)
+
     seed = int(manifest.get("eval", {}).get("seed", 3407))
-    random.seed(seed)
+    random.seed(seed + int(args.shard_id))
 
     try:
         import torch
 
-        torch.manual_seed(seed)
-
+        torch.manual_seed(seed + int(args.shard_id))
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
+            torch.cuda.manual_seed_all(seed + int(args.shard_id))
     except Exception:
         pass
 
@@ -391,11 +442,19 @@ def main() -> int:
             "detector.strict_identity_gap": True,
             "dataset.split_csv": manifest["data"]["eval_csv"],
             "dataset.max_items": int(manifest["eval"].get("max_items", 512)),
+            "dataset.shard_id": int(args.shard_id),
+            "dataset.shard_count": int(args.shard_count),
             "intervention.mode": manifest["eval"].get("intervention_mode", "blur"),
             "intervention.topk_frac": float(manifest["eval"].get("topk_frac", 0.12)),
         },
     )
 
+    print(
+        f"[eval] max_items={manifest['eval'].get('max_items')} "
+        f"shard={args.shard_id}/{args.shard_count} device={args.device} "
+        f"output_dir={manifest['eval'].get('output_dir')}",
+        flush=True,
+    )
     print(f"Loading CIFT checkpoint: {manifest['cift']['ckpt']}", flush=True)
 
     adapter = CIFTAdapter(
@@ -435,7 +494,6 @@ def main() -> int:
         )
 
         write_csv(out_path, rows)
-
         print(f"[wrote] {out_path}", flush=True)
 
         for r in rows:
@@ -443,18 +501,26 @@ def main() -> int:
 
     combined_path = os.path.join(out_dir, "combined_tables_1_2_3.csv")
     write_csv(combined_path, combined)
-
     print(f"\n[done] combined: {combined_path}", flush=True)
 
     import time
+
     history_path = os.path.join(out_dir, "metrics_history.csv")
     hist_rows = []
     run_ts = int(time.time())
     for r in combined:
-        hist_rows.append({"run_ts": run_ts, "max_items": manifest["eval"].get("max_items"), **r})
+        hist_rows.append(
+            {
+                "run_ts": run_ts,
+                "max_items": manifest["eval"].get("max_items"),
+                "shard_id": int(args.shard_id),
+                "shard_count": int(args.shard_count),
+                **r,
+            }
+        )
     if hist_rows:
         exists = os.path.exists(history_path)
-        cols = []
+        cols: List[str] = []
         for r in hist_rows:
             for k in r:
                 if k not in cols:
@@ -467,7 +533,6 @@ def main() -> int:
         print(f"[history] appended: {history_path}", flush=True)
 
     failed = [r for r in combined if r.get("status") != "ok"]
-
     if failed:
         print(f"[warn] {len(failed)} rows failed. Open the CSV and read the error column.", flush=True)
         return 2

@@ -72,6 +72,16 @@ policies:
     reward_preset: full_rift
     horizon: 8
     ckpt: auto
+  full_h10:
+    run_name: T3_RIFT_full_H10
+    reward_preset: full_rift
+    horizon: 10
+    ckpt: auto
+  full_h12:
+    run_name: T3_RIFT_full_H12
+    reward_preset: full_rift
+    horizon: 12
+    ckpt: auto
 tables:
   table1_component:
     filename: table1_component_ablation.csv
@@ -100,11 +110,11 @@ tables:
       ns: true
       rp: false
     - id: 3
-      variant: "CIFT-\u0394 + causal select"
+      variant: CIFT-Δ + causal select
       kind: causal_select
       base: cift_delta
       channel: delta
-      mask_source: "\u0394 + NS select"
+      mask_source: Δ + NS select
       delta_g: true
       ns: true
       rp: false
@@ -120,7 +130,7 @@ tables:
       variant: RIFT full
       kind: policy
       policy: full_h4
-      mask_source: "RL from \u0394 evidence"
+      mask_source: RL from Δ evidence
       delta_g: true
       ns: true
       rp: true
@@ -159,10 +169,10 @@ tables:
     filename: table3_horizon_ablation.csv
     rows:
     - id: 1
-      variant: "CIFT-\u0394 top-k fixed"
+      variant: CIFT-Δ top-k fixed
       kind: cift_delta
-      mask_source: "CIFT-\u0394 top-k fixed"
-      horizon: "\u2014"
+      mask_source: CIFT-Δ top-k fixed
+      horizon: —
     - id: 2
       variant: RL policy H=1
       kind: policy
@@ -181,3 +191,15 @@ tables:
       policy: full_h8
       mask_source: RL policy
       horizon: H=8
+    - id: 5
+      variant: RL policy H=10
+      kind: policy
+      policy: full_h10
+      mask_source: RL policy
+      horizon: H=10
+    - id: 6
+      variant: RL policy H=12
+      kind: policy
+      policy: full_h12
+      mask_source: RL policy
+      horizon: H=12

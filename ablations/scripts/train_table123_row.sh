@@ -26,7 +26,8 @@ ROW="${ROW:?ERROR: set ROW=<policy_key>, e.g. ROW=full_h4}"
 # Apply reward/objective patches once per run.
 python ablations/patch_for_ablations.py
 
-eval "$(python -m ablations.lib.manifest --config "$ABLCFG" --row "$ROW" --emit-bash-train)"
+MANIFEST_VARS="$(python -m ablations.lib.manifest --config "$ABLCFG" --row "$ROW" --emit-bash-train)"
+eval "$MANIFEST_VARS"
 
 GPUS="${GPUS:-$GPUS_DEFAULT}"
 BATCH="${BATCH:-$BATCH_DEFAULT}"
