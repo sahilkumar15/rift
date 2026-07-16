@@ -5,10 +5,10 @@ ABLCFG="${ABLCFG:-ablations/configs/table123_rift.yaml}"
 GPU="${GPU:-6,7}"
 TABLES="${TABLES:-table1_component}"
 MAX_ITEMS="${MAX_ITEMS:-full}"
-SKIP_OK_EXISTING="${SKIP_OK_EXISTING:-false}"
+SKIP_OK_EXISTING="${SKIP_OK_EXISTING:-true}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+FORWARD_BATCH_SIZE="${FORWARD_BATCH_SIZE:-32}"
 
-# Generalized eval saving.
-# Change these when needed.
 EVAL_ROOT="${EVAL_ROOT:-experiments/ablations/rift_table123/eval}"
 SAFE_TABLES="${TABLES//,/__}"
 SAFE_MAX="${MAX_ITEMS//\//_}"
@@ -18,6 +18,7 @@ EVAL_DIR="${EVAL_ROOT}/${EVAL_NAME}"
 SHARD_ROOT="${EVAL_DIR}/shards"
 LOG_ROOT="${EVAL_DIR}/logs"
 OUT_DIR="${EVAL_DIR}/tables"
+PROGRESS_ROOT="${EVAL_DIR}/progress"
 
 python ablations/patch_for_ablations.py
 
@@ -35,27 +36,28 @@ if [[ "$SHARD_COUNT" -lt 1 ]]; then
   exit 1
 fi
 
-mkdir -p "$SHARD_ROOT" "$LOG_ROOT" "$OUT_DIR"
+mkdir -p "$SHARD_ROOT" "$LOG_ROOT" "$OUT_DIR" "$PROGRESS_ROOT"
+rm -f "$PROGRESS_ROOT"/*.json "$PROGRESS_ROOT"/*.exit 2>/dev/null || true
 
 export PYTHONPATH="$(pwd):$CIFT_ROOT:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
-export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-python -m py_compile ablations/eval_table123.py
+python -m py_compile ablations/eval_table123.py ablations/lib/explainers.py
 
 echo "═══════════════════════════════════════════════════════════"
-echo " RIFT Table123 PARALLEL evaluation"
-echo " gpus        : $GPU"
-echo " shards      : $SHARD_COUNT"
-echo " tables      : $TABLES"
-echo " max_items   : $MAX_ITEMS"
-echo " config      : $ABLCFG"
-echo " eval_root   : $EVAL_ROOT"
-echo " eval_name   : $EVAL_NAME"
-echo " shard_root  : $SHARD_ROOT"
-echo " log_root    : $LOG_ROOT"
-echo " out_dir     : $OUT_DIR"
-echo " skip_ok     : $SKIP_OK_EXISTING"
+echo " RIFT Table123 FAST PARALLEL evaluation"
+echo " gpus          : $GPU"
+echo " shards        : $SHARD_COUNT"
+echo " tables        : $TABLES"
+echo " max_items     : $MAX_ITEMS"
+echo " eval_batch    : $BATCH_SIZE images"
+echo " forward_batch : $FORWARD_BATCH_SIZE CIFT inputs"
+echo " config        : $ABLCFG"
+echo " eval_name     : $EVAL_NAME"
+echo " logs          : $LOG_ROOT"
+echo " tables        : $OUT_DIR"
+echo " skip_ok       : $SKIP_OK_EXISTING"
 echo "═══════════════════════════════════════════════════════════"
 
 pids=()
@@ -63,42 +65,109 @@ pids=()
 for i in "${!GPUS_ARR[@]}"; do
   gpu_i="${GPUS_ARR[$i]}"
   shard_dir="$SHARD_ROOT/shard_${i}"
+  log_file="$LOG_ROOT/shard_${i}.log"
+  progress_file="$PROGRESS_ROOT/shard_${i}.json"
+  exit_file="$PROGRESS_ROOT/shard_${i}.exit"
   mkdir -p "$shard_dir"
 
   echo "[launch] shard $i/$SHARD_COUNT on physical GPU $gpu_i"
 
-  cmd="cd $(pwd) && \
-CUDA_VISIBLE_DEVICES=$gpu_i \
-SHARD_ID=$i \
-SHARD_COUNT=$SHARD_COUNT \
-PYTHONUNBUFFERED=1 \
-PYTHONPATH=$(pwd):$CIFT_ROOT:${PYTHONPATH:-} \
-python -u -m ablations.eval_table123 \
-  --ablation-config $ABLCFG \
-  --tables $TABLES \
-  --device cuda:0 \
-  --max-items $MAX_ITEMS \
-  --shard-id $i \
-  --shard-count $SHARD_COUNT \
-  --output-dir $shard_dir"
+  cmd=(
+    python -u -m ablations.eval_table123
+    --ablation-config "$ABLCFG"
+    --tables "$TABLES"
+    --device cuda:0
+    --max-items "$MAX_ITEMS"
+    --batch-size "$BATCH_SIZE"
+    --forward-batch-size "$FORWARD_BATCH_SIZE"
+    --shard-id "$i"
+    --shard-count "$SHARD_COUNT"
+    --output-dir "$shard_dir"
+    --progress-file "$progress_file"
+    --no-tqdm
+  )
 
-  if [[ "$SKIP_OK_EXISTING" == "true" ]]; then
-    cmd="$cmd --skip-ok-existing"
+  if [[ "$SKIP_OK_EXISTING" == "true" || "$SKIP_OK_EXISTING" == "1" ]]; then
+    cmd+=(--skip-ok-existing)
   fi
 
-  # pseudo-terminal mode keeps tqdm as real progress bars
-  script -q -f -c "$cmd" "$LOG_ROOT/shard_${i}.log" &
-
+  (
+    set +e
+    CUDA_VISIBLE_DEVICES="$gpu_i" \
+    SHARD_ID="$i" \
+    SHARD_COUNT="$SHARD_COUNT" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH="$(pwd):$CIFT_ROOT:${PYTHONPATH:-}" \
+      "${cmd[@]}" >"$log_file" 2>&1
+    rc=$?
+    printf '%s\n' "$rc" >"$exit_file"
+    exit "$rc"
+  ) &
   pids+=("$!")
 done
 
-fail=0
+# One clean aggregate tqdm bar. Worker output stays in per-GPU logs.
+python - "$PROGRESS_ROOT" "$SHARD_COUNT" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+from tqdm import tqdm
 
+root = Path(sys.argv[1])
+count = int(sys.argv[2])
+bar = tqdm(total=1, desc="Loading CIFT", unit="img", dynamic_ncols=True, mininterval=0.5)
+last_done = 0
+
+while True:
+    states = []
+    for i in range(count):
+        path = root / f"shard_{i}.json"
+        if not path.exists():
+            continue
+        try:
+            states.append(json.loads(path.read_text()))
+        except Exception:
+            pass
+
+    if states:
+        total = sum(max(0, int(s.get("overall_total", 0))) for s in states)
+        done = sum(max(0, int(s.get("overall_done", 0))) for s in states)
+        if total > 0 and bar.total != total:
+            bar.total = total
+            bar.refresh()
+        delta = max(0, done - last_done)
+        if delta:
+            bar.update(delta)
+            last_done = done
+
+        active = []
+        for s in states:
+            name = str(s.get("variant", "")).strip()
+            if name and name not in ("Complete", "Loading CIFT") and name not in active:
+                active.append(name)
+        if active:
+            bar.set_description(" | ".join(active[:2]))
+        elif all(str(s.get("variant")) == "Complete" for s in states):
+            bar.set_description("Complete")
+
+    exits = [root / f"shard_{i}.exit" for i in range(count)]
+    if all(path.exists() for path in exits):
+        break
+    time.sleep(1.0)
+
+if bar.total > 0 and last_done < bar.total:
+    bar.update(bar.total - last_done)
+bar.close()
+PY
+
+fail=0
 for i in "${!pids[@]}"; do
   if wait "${pids[$i]}"; then
     echo "[ok] shard $i finished"
   else
-    echo "[FAILED] shard $i failed. See $LOG_ROOT/shard_${i}.log" >&2
+    echo "[FAILED] shard $i failed. Last log lines:" >&2
+    tail -80 "$LOG_ROOT/shard_${i}.log" >&2 || true
     fail=1
   fi
 done
@@ -131,109 +200,126 @@ META_COLS = {
     "n", "status", "error",
 }
 
+
 def read_csv(path):
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+    with open(path, newline="") as handle:
+        return list(csv.DictReader(handle))
+
 
 def write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
-    cols = []
-    for r in rows:
-        for k in r:
-            if k not in cols:
-                cols.append(k)
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        w.writerows(rows)
+    columns = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with open(tmp, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp.replace(path)
 
-def to_float(x):
+
+def to_float(value):
     try:
-        if x is None or str(x).strip() == "":
+        if value is None or str(value).strip() == "":
             return None
-        return float(str(x).replace(",", ""))
+        return float(str(value).replace(",", ""))
     except Exception:
         return None
 
-def to_int(x):
+
+def to_int(value):
     try:
-        return int(float(str(x).replace(",", "")))
+        return int(float(str(value).replace(",", "")))
     except Exception:
         return 0
+
 
 def merge_rows(shard_rows, ordered_ids):
     by_id = {}
     for rows in shard_rows:
-        for r in rows:
-            by_id.setdefault(str(r.get("ID", "")), []).append(r)
+        for row in rows:
+            by_id.setdefault(str(row.get("ID", "")), []).append(row)
 
     merged = []
-    for rid in ordered_ids:
-        parts = by_id.get(str(rid), [])
+    for row_id in ordered_ids:
+        parts = by_id.get(str(row_id), [])
         if not parts:
             continue
 
-        first = dict(parts[0])
-        out = dict(first)
-        n_sum = sum(to_int(p.get("n", 0)) for p in parts)
-        out["n"] = n_sum
+        output = dict(parts[0])
+        n_sum = sum(to_int(part.get("n", 0)) for part in parts)
+        output["n"] = n_sum
 
-        failed = [p for p in parts if str(p.get("status", "ok")).lower() != "ok"]
-        out["status"] = "FAILED" if failed else "ok"
-        out["error"] = " | ".join(p.get("error", "") for p in failed if p.get("error"))
+        failed = [
+            part
+            for part in parts
+            if str(part.get("status", "ok")).lower() != "ok"
+        ]
+        output["status"] = "FAILED" if failed else "ok"
+        output["error"] = " | ".join(
+            part.get("error", "") for part in failed if part.get("error")
+        )
 
-        for col in list(first.keys()):
-            if col in META_COLS:
+        for column in list(output.keys()):
+            if column in META_COLS:
                 continue
-
-            vals, weights = [], []
-            for p in parts:
-                if str(p.get("status", "ok")).lower() != "ok":
+            values = []
+            weights = []
+            for part in parts:
+                if str(part.get("status", "ok")).lower() != "ok":
                     continue
-                v = to_float(p.get(col))
-                if v is None:
-                    vals = []
+                value = to_float(part.get(column))
+                if value is None:
+                    values = []
                     break
-                vals.append(v)
-                weights.append(to_int(p.get("n", 0)))
+                values.append(value)
+                weights.append(to_int(part.get("n", 0)))
 
-            if vals:
-                denom = sum(weights) if sum(weights) > 0 else len(vals)
-                num = sum(v * (w if sum(weights) > 0 else 1) for v, w in zip(vals, weights))
-                out[col] = f"{num / max(1, denom):.4f}"
+            if values:
+                weight_sum = sum(weights)
+                if weight_sum > 0:
+                    merged_value = sum(v * w for v, w in zip(values, weights)) / weight_sum
+                else:
+                    merged_value = sum(values) / len(values)
+                output[column] = f"{merged_value:.4f}"
 
-        merged.append(out)
+        merged.append(output)
 
     return merged
 
-wanted = [x.strip() for x in TABLES.split(",") if x.strip()]
+
+wanted = [item.strip() for item in TABLES.split(",") if item.strip()]
 combined = []
 
 for table_key in wanted:
     if table_key not in manifest["tables"]:
-        raise SystemExit(f"Unknown table key {table_key}. Available: {list(manifest['tables'])}")
+        raise SystemExit(
+            f"Unknown table key {table_key}. Available: {list(manifest['tables'])}"
+        )
 
     spec = manifest["tables"][table_key]
-    fname = spec["filename"]
-
+    filename = spec["filename"]
     shard_rows = []
+
     for i in range(SHARD_COUNT):
-        path = SHARD_ROOT / f"shard_{i}" / fname
+        path = SHARD_ROOT / f"shard_{i}" / filename
         if not path.exists():
             raise SystemExit(f"Missing shard CSV: {path}")
         shard_rows.append(read_csv(path))
 
-    ordered_ids = [r["id"] for r in spec["rows"]]
+    ordered_ids = [row["id"] for row in spec["rows"]]
     merged = merge_rows(shard_rows, ordered_ids)
-
-    final_path = OUT_DIR / fname
+    final_path = OUT_DIR / filename
     write_csv(final_path, merged)
     print(f"[merged] {table_key}: {final_path}")
 
-    for r in merged:
-        combined.append({"table": table_key, **r})
+    for row in merged:
+        combined.append({"table": table_key, **row})
 
 combined_path = OUT_DIR / "combined_tables_1_2_3.csv"
 write_csv(combined_path, combined)

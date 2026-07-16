@@ -1,5 +1,6 @@
 base_config: configs/rift_general.yaml
-root_dir: experiments/ablations/rift_table123
+# root_dir: experiments/ablations/rift_table123
+root_dir: experiments/ablations/table2
 cift:
   root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
   ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
@@ -82,6 +83,54 @@ policies:
     reward_preset: full_rift
     horizon: 12
     ckpt: auto
+  necessity_var_h10:
+    run_name: T2V_RIFT_necessity_only_H10
+    reward_preset: necessity_only
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  sufficiency_var_h10:
+    run_name: T2V_RIFT_sufficiency_only_H10
+    reward_preset: sufficiency_only
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  nosparsity_var_h10:
+    run_name: T2V_RIFT_no_sparsity_H10
+    reward_preset: no_sparsity
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  full_var_h10:
+    run_name: T2V_RIFT_full_H10
+    reward_preset: full_rift
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
 tables:
   table1_component:
     filename: table1_component_ablation.csv
@@ -203,3 +252,34 @@ tables:
       policy: full_h12
       mask_source: RL policy
       horizon: H=12
+  table2_objective_variable:
+    filename: table2_objective_variable_ablation.csv
+    rows:
+    - id: 1
+      variant: Necessity-only
+      kind: policy
+      policy: necessity_var_h10
+      necessity: true
+      sufficiency: false
+      sparsity: true
+    - id: 2
+      variant: Sufficiency-only
+      kind: policy
+      policy: sufficiency_var_h10
+      necessity: false
+      sufficiency: true
+      sparsity: true
+    - id: 3
+      variant: N+S, no sparsity
+      kind: policy
+      policy: nosparsity_var_h10
+      necessity: true
+      sufficiency: true
+      sparsity: false
+    - id: 4
+      variant: RIFT full
+      kind: policy
+      policy: full_var_h10
+      necessity: true
+      sufficiency: true
+      sparsity: true

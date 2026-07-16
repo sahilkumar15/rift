@@ -84,6 +84,11 @@ class BatchedRIFTEnv:
         self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
         self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
         self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
+        self.stopped = torch.zeros(
+            self.B,
+            device=self.image.device,
+            dtype=torch.bool,
+        )
 
         self.e0_gap = torch.zeros(self.B, device=self.image.device)
         self.e0_logit = torch.zeros(self.B, device=self.image.device)
@@ -95,6 +100,11 @@ class BatchedRIFTEnv:
         self.mask = torch.zeros(self.B, 1, self.grid, self.grid, device=self.image.device)
         self.last_action = torch.full((self.B,), -1, device=self.image.device, dtype=torch.long)
         self.done = torch.zeros(self.B, device=self.image.device, dtype=torch.bool)
+        self.stopped = torch.zeros(
+            self.B,
+            device=self.image.device,
+            dtype=torch.bool,
+        )
 
         need_delta = abs(float(self.reward_fn.get("w_delta", 1.0))) > 0.0
 
@@ -152,6 +162,12 @@ class BatchedRIFTEnv:
             if self.allow_stop_as_noop:
                 valid[reached_max, self.stop_action] = True
 
+        # Samples that already selected STOP must remain frozen. Only STOP is
+        # valid for them during the remaining batched rollout steps.
+        if self.allow_stop_as_noop and self.stopped.any():
+            valid[self.stopped, :] = False
+            valid[self.stopped, self.stop_action] = True
+
         # Safety fallback: if every action became invalid, allow STOP if possible;
         # otherwise allow the first cell. This avoids NaN logits in PPO.
         dead = ~valid.any(dim=1)
@@ -172,6 +188,11 @@ class BatchedRIFTEnv:
             "confidence": self.e0_logit.detach().clone(),
             "step_idx": torch.full((self.B,), float(self.step_idx), device=self.image.device),
             "last_action": self.last_action.detach().clone().float(),
+            "selected_frac": (
+                self.mask[:, 0].flatten(1).sum(dim=1).float()
+                / float(self.n_cells)
+            ).detach().clone(),
+            "stopped": self.stopped.detach().clone(),
             "e0_gap": self.e0_gap.detach().clone(),
         }
 
@@ -188,6 +209,10 @@ class BatchedRIFTEnv:
 
     def _repair_actions(self, actions):
         actions = actions.clamp(0, self.stop_action).clone()
+
+        # A sample that previously selected STOP can never add another cell.
+        if self.allow_stop_as_noop and self.stopped.any():
+            actions[self.stopped] = self.stop_action
 
         selected = self.mask[:, 0].flatten(1).sum(dim=1)
 
@@ -230,13 +255,28 @@ class BatchedRIFTEnv:
         actions = actions.detach().to(self.image.device).long().view(-1)
 
         if actions.numel() != self.B:
-            raise RuntimeError(f"actions must have B={self.B} elements, got {actions.numel()}")
+            raise RuntimeError(
+                f"actions must have B={self.B} elements, got {actions.numel()}"
+            )
 
         self.step_idx += 1
-        actions = self._repair_actions(actions)
-        self.last_action = actions
 
-        cell_mask = actions != self.stop_action
+        active_before = ~self.stopped
+        actions = self._repair_actions(actions)
+
+        # STOP becomes permanent once it is validly selected.
+        newly_stopped = (
+            active_before
+            & (actions == self.stop_action)
+            & bool(self.allow_stop_as_noop)
+        )
+        self.stopped = self.stopped | newly_stopped
+
+        cell_mask = (
+            active_before
+            & (~newly_stopped)
+            & (actions != self.stop_action)
+        )
 
         if cell_mask.any():
             idx = torch.nonzero(cell_mask, as_tuple=False).flatten()
@@ -249,19 +289,58 @@ class BatchedRIFTEnv:
                 1.0,
             )
 
-        done_now = self.step_idx >= self.horizon
-        self.done = torch.full((self.B,), bool(done_now), device=self.image.device, dtype=torch.bool)
+        selected_after = self.mask[:, 0].flatten(1).sum(dim=1)
+
+        # Reaching max_cells is equivalent to automatically stopping.
+        if self.allow_stop_as_noop:
+            reached_max = selected_after >= float(self.max_cells)
+            self.stopped = self.stopped | reached_max
+
+        self.last_action = torch.where(
+            self.stopped,
+            torch.full_like(actions, self.stop_action),
+            actions,
+        )
+
+        done_now = (
+            self.step_idx >= self.horizon
+            or (
+                self.allow_stop_as_noop
+                and bool(self.stopped.all().item())
+            )
+        )
+
+        self.done = torch.full(
+            (self.B,),
+            bool(done_now),
+            device=self.image.device,
+            dtype=torch.bool,
+        )
 
         if done_now:
             reward, info = self._terminal_reward()
         else:
-            area = _mask_area_per_sample(self.current_mask(), self.topk_frac)
+            area = _mask_area_per_sample(
+                self.current_mask(),
+                self.topk_frac,
+            )
             reward = -0.01 * torch.clamp(area - 0.5, min=0.0)
-            info = {"mask_area": float(area.mean().item())}
+            info = {
+                "mask_area": float(area.mean().item()),
+                "stopped_frac": float(
+                    self.stopped.float().mean().item()
+                ),
+            }
 
-        return self._state(), reward.detach(), self.done.detach().clone(), info
+        return (
+            self._state(),
+            reward.detach(),
+            self.done.detach().clone(),
+            info,
+        )
 
     def _terminal_reward(self):
+        from ..faithfulness.faithfulness_score import compute_rift_score_tensor
         from ..interventions.interventions import apply_necessity, apply_sufficiency
 
         pm = self.current_mask()
@@ -320,8 +399,9 @@ class BatchedRIFTEnv:
                     )
 
         area = _mask_area_per_sample(pm, self.topk_frac)
+        selected_cells = self.mask[:, 0].flatten(1).sum(dim=1).float()
 
-        reward, comps = _compute_rift_score_tensor(
+        reward, comps = compute_rift_score_tensor(
             e0_delta=self.e0_gap,
             e_nec_delta=gap_nec,
             e_suf_delta=gap_suf,
@@ -329,6 +409,7 @@ class BatchedRIFTEnv:
             e_nec_logit=l_nec,
             e_suf_logit=l_suf,
             mask_area=area,
+            selected_cells=selected_cells,
             identity_gap_mode=self.identity_gap_mode,
             weights=self.reward_fn,
         )
@@ -338,7 +419,6 @@ class BatchedRIFTEnv:
             for k, v in comps.items()
         }
 
-        selected_cells = self.mask[:, 0].flatten(1).sum(dim=1)
         flat_mask = self.mask[:, 0].flatten(1).float()
         p_cell = flat_mask.mean(dim=0)
         active = p_cell > 0
@@ -358,7 +438,9 @@ class BatchedRIFTEnv:
         info["selected_cells_min"] = float(selected_cells.float().min().item())
         info["selected_cells_max"] = float(selected_cells.float().max().item())
         info["selected_frac"] = float((selected_cells.float() / float(self.n_cells)).mean().item())
-        info["stopped_frac"] = float((self.last_action == self.stop_action).float().mean().item())
+        info["stopped_frac"] = float(
+            self.stopped.float().mean().item()
+        )
 
         # Validity flags: logit is always available; true Δ is only available
         # in donor/identity-gap audit mode.
