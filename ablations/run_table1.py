@@ -183,103 +183,88 @@ def build_explainer(variant: Dict[str, Any], cfg_t1: Dict[str, Any], device: str
     raise RuntimeError(f"Unknown variant kind={kind}")
 
 
-def audit_one(*, cfg, adapter, explainer, cfg_t1, device, desc):
-    """Return per-sample metric lists for one (dataset, variant, seed)."""
+def audit_dataset_batch_major(*, adapter, cfg_t1, ds, explainers, order, device):
+    """Audit EVERY variant on a dataset with ONE pass over the images.
+
+    Replaces the old variant-major audit_one(): that re-read the whole dataset
+    per variant (7x the decodes) and recomputed e0 per variant (identical every
+    time). See ablations/audit_batch.py for the full rationale.
+    """
     import torch
     from tqdm import tqdm
 
-    from src.audit.ablation_runner import iter_audit_samples
-    from src.faithfulness.faithfulness_score import compute_rift_score_tensor
-    from src.interventions.interventions import apply_necessity, apply_sufficiency
+    from ablations.audit_batch import METRIC_KEYS, audit_batch
+    from ablations.lib.fast_loader import build_loader
     from src.rl.reward import get_reward_weights
 
     ev = cfg_t1["eval"]
-    mode = str(ev.get("intervention_mode", "blur"))
-    cells = int(ev["cells"])
     grid = int(ev.get("grid", 8))
+    cells = int(ev["cells"])
     topk = float(cells) / float(grid * grid)
-    fbs = int(ev.get("forward_batch_size", 32))
-    bs = max(1, int(ev.get("batch_size", 8)))
-    max_items = int(ev["_max_items_resolved"])
-    min_ev = float(ev.get("min_evidence", 0.0) or 0.0)
-
     weights = dict(get_reward_weights(str(ev.get("reward_preset", "full_rift"))))
-    weights["min_evidence"] = min_ev
+    weights["min_evidence"] = float(ev.get("min_evidence", 0.0) or 0.0)
 
-    keys = (
-        "necessity_delta", "sufficiency_delta", "faithfulness_delta",
-        "necessity_logit", "sufficiency_logit", "faithfulness_logit",
-        "mask_area", "rift_score",
+    cap = int(ev["_max_items_resolved"])
+    loader, n_rows = build_loader(
+        ds["eval_csv"],
+        batch_size=int(ev.get("batch_size", 8)),
+        size=int(ev.get("image_size", 256)),
+        cap=cap,
+        workers=int(ev.get("workers", 8)),
+        strict=True,
     )
-    acc = {k: [] for k in keys}
-    valid_d, valid_l = [], []
+
+    dead_explainers: Dict[Any, str] = {}
+    acc = {k: {m: [] for m in METRIC_KEYS} for k in order}
+    vds = {k: [] for k in order}
+    vls = {k: [] for k in order}
     modes = set()
-    n = 0
+    seen = 0
 
-    it = _iter_batches(iter_audit_samples(cfg, device=device, n=max_items), bs)
-    bar = tqdm(total=max_items, desc=desc, unit="img", file=sys.stderr,
-               dynamic_ncols=True, mininterval=1.0)
+    bar = tqdm(total=n_rows, desc=f"{ds['display']}", unit="img",
+               file=sys.stderr, dynamic_ncols=True, mininterval=1.0)
     try:
-        for image, donor, _ in it:
-            mask = explainer.explain(image, adapter, donor=donor)
-            nec_img = apply_necessity(image, mask, mode, topk)
-            suf_img = apply_sufficiency(image, mask, mode, topk)
+        for image, donor in loader:
+            image = image.to(device, non_blocking=True)
+            if donor is not None:
+                donor = donor.to(device, non_blocking=True)
 
-            cached = None
-            if hasattr(explainer, "cached_original_evidence"):
-                cached = explainer.cached_original_evidence(image)
-
-            if cached is not None and bool(cached.get("complete", False)):
-                b = int(image.shape[0])
-                e0_g = cached["gap"].to(image.device).float().view(-1)
-                e0_l = cached["logit"].to(image.device).float().view(-1)
-                g_nec, g_suf = cached["gap_nec"].float().view(-1), cached["gap_suf"].float().view(-1)
-                l_nec, l_suf = cached["logit_nec"].float().view(-1), cached["logit_suf"].float().view(-1)
-                emode = str(cached.get("mode", "proxy"))
-            else:
-                stack = torch.cat([image, nec_img, suf_img], dim=0)
-                dstack = torch.cat([donor] * 3, dim=0) if donor is not None else None
-                raw, gaps, emode, _ = predict_evidence(
-                    adapter, stack, dstack, max_batch=fbs, return_features=False
-                )
-                b = int(image.shape[0])
-                lev = logit_to_evidence(raw)
-                e0_g, g_nec, g_suf = gaps[:b], gaps[b:2 * b], gaps[2 * b:]
-                e0_l, l_nec, l_suf = lev[:b], lev[b:2 * b], lev[2 * b:]
-
-            modes.add(str(emode))
-
-            binary = (mask.float() > 1e-6).float()
-            area = binary.flatten(1).mean(dim=1)
-            sel = binary.flatten(1).sum(dim=1) / float(binary.shape[-1] * binary.shape[-2]) * float(grid * grid)
-
-            _, comps = compute_rift_score_tensor(
-                e0_delta=e0_g, e_nec_delta=g_nec, e_suf_delta=g_suf,
-                e0_logit=e0_l, e_nec_logit=l_nec, e_suf_logit=l_suf,
-                mask_area=area, selected_cells=sel,
-                identity_gap_mode=emode, weights=weights,
+            mets, vd, vl, mode = audit_batch(
+                adapter=adapter, image=image, donor=donor,
+                explainers=explainers, order=order,
+                intervention_mode=str(ev.get("intervention_mode", "blur")),
+                topk_frac=topk, forward_batch_size=int(ev.get("forward_batch_size", 64)),
+                grid=grid, weights=weights, dead=dead_explainers,
             )
-
-            vd = (e0_g > min_ev).float().cpu().view(-1).tolist()
-            vl = (e0_l > min_ev).float().cpu().view(-1).tolist()
-            valid_d.extend(vd)
-            valid_l.extend(vl)
-            for k in keys:
-                acc[k].extend(comps[k].detach().float().cpu().view(-1).tolist())
-
-            n += int(image.shape[0])
+            if not mets:
+                continue
+            modes.add(mode)
+            for k in order:
+                if k not in mets:
+                    continue
+                for m in METRIC_KEYS:
+                    acc[k][m].extend(mets[k][m])
+                vds[k].extend(vd[k])
+                vls[k].extend(vl[k])
+            seen += int(image.shape[0])
             bar.update(int(image.shape[0]))
     finally:
         bar.close()
 
-    if n == 0:
-        raise RuntimeError(
-            "0 samples evaluated. Check the dataset eval_csv, donor paths, and max_items."
-        )
+    if seen == 0:
+        raise RuntimeError("0 samples evaluated.")
 
-    emode_final = "true" if modes == {"true"} else (sorted(modes)[0] if modes else "proxy")
-    return {"per_sample": acc, "valid_delta": valid_d, "valid_logit": valid_l,
-            "n": n, "mode": emode_final}
+    final_mode = "true" if modes == {"true"} else (sorted(modes)[0] if modes else "proxy")
+    # Explainers that died mid-sweep hold PARTIAL per-sample data. Reporting a
+    # mean over a truncated prefix would be silently wrong, so drop them
+    # entirely and surface the error against their row instead.
+    out = {
+        k: {"per_sample": acc[k], "valid_delta": vds[k], "valid_logit": vls[k],
+            "n": seen, "mode": final_mode}
+        for k in order if k not in dead_explainers
+    }
+    out["__dead__"] = dead_explainers
+    return out
 
 
 def _conditional(values: List[float], valid: List[float]) -> List[float]:
@@ -430,51 +415,85 @@ def main() -> int:
         print(f"\n{'=' * 78}\nDATASET {ds_key} ({ds['display']})  role={ds['role']}  "
               f"donor={ds['donor_type']}  n={ev['_max_items_resolved']}\n{'=' * 78}", flush=True)
 
-        ds_rows = []
+        # BATCH-MAJOR-MAIN
+        # Build every (variant, seed) explainer up front, then sweep the dataset
+        # ONCE. Variant-major would re-decode the whole dataset per variant.
+        explainers, order, build_errors = {}, [], {}
         for v in variants:
             seeds = list(ev["seeds"]) if v.get("stochastic") else [int(ev["seeds"][0])]
-            print(f"\n[{ds_key}] id={v['id']} {v['variant']}  seeds={len(seeds)}", flush=True)
+            for s in seeds:
+                key = (int(v["id"]), int(s))
+                try:
+                    explainers[key] = build_explainer(v, t1, args.device, s)
+                    order.append(key)
+                except Exception as exc:
+                    build_errors[int(v["id"])] = f"{type(exc).__name__}: {exc}"
+                    print(f"  [skip] id={v['id']} {v['variant']}: {build_errors[int(v['id'])]}",
+                          flush=True)
+                    break
+
+        swept, sweep_error = {}, None
+        if order:
+            print(f"\n  sweeping {ev['_max_items_resolved']} images once for "
+                  f"{len(order)} masks/image "
+                  f"({1 + 2 * len(order)} forwards/image)", flush=True)
+            try:
+                swept = audit_dataset_batch_major(
+                    adapter=adapter, cfg_t1=t1, ds=ds,
+                    explainers=explainers, order=order, device=args.device,
+                )
+            except Exception as exc:
+                sweep_error = f"{type(exc).__name__}: {exc}"
+                print(f"  SWEEP FAILED: {sweep_error}", flush=True)
+
+        ds_rows = []
+        for v in variants:
+            vid = int(v["id"])
             row = {
                 "Dataset": ds["display"], "dataset_key": ds_key, "Role": ds["role"],
-                "Donor": ds["donor_type"], "ID": v["id"], "Variant": v["variant"],
+                "Donor": ds["donor_type"], "ID": vid, "Variant": v["variant"],
                 "Mask source": v.get("mask_source", ""),
                 "ΔG": tick(v.get("delta_g")), "NS": tick(v.get("ns")), "RP": tick(v.get("rp")),
             }
+            keys = [k for k in order if k[0] == vid]
+            dead_map = swept.get("__dead__", {}) if swept else {}
+            row_dead = next((dead_map[k] for k in keys if k in dead_map), None)
+            keys = [k for k in keys if k in swept]
+            err = build_errors.get(vid) or row_dead or sweep_error
+            if err or not keys:
+                row.update({"status": "FAILED", "error": err or "no explainer built",
+                            "n": 0, "_fd_samples": []})
+                ds_rows.append(row)
+                continue
             try:
-                runs = []
-                for s in seeds:
-                    ex = build_explainer(v, t1, args.device, s)
-                    runs.append(audit_one(cfg=cfg, adapter=adapter, explainer=ex,
-                                          cfg_t1=t1, device=args.device,
-                                          desc=f"{ds_key}:{v['id']}:{s}"))
-                    if getattr(ex, "used_delta_fallback", False):
+                for k in keys:
+                    if getattr(explainers[k], "used_delta_fallback", False):
                         row["gradcam_delta_fallback"] = True
-                agg = aggregate(runs, t1)
-                fd_samples = agg.pop("_fd_samples")
-                row["_fd_samples"] = fd_samples
-
+                agg = aggregate([swept[k] for k in keys], t1)
+                row["_fd_samples"] = agg.pop("_fd_samples")
                 area = agg["mask_area"]
                 if not math.isclose(area, expected_area, abs_tol=2e-3):
                     raise RuntimeError(
                         f"AREA MISMATCH: row '{v['variant']}' produced mask_area="
                         f"{area:.4f}, expected {expected_area:.4f}. Table 1 requires "
-                        "identical budget across rows; an unmatched row is "
+                        "an identical budget across rows; an unmatched row is "
                         "uninterpretable. Wrap the explainer in GridTopKExplainer."
                     )
-                for k, val in agg.items():
-                    row[k] = round(val, 4) if isinstance(val, float) else val
+                for k2, val in agg.items():
+                    row[k2] = round(val, 4) if isinstance(val, float) else val
                 row["status"], row["error"] = "ok", ""
-                print(f"  ok  faithΔ={row['faith_delta']}  faith_logit={row['faith_logit']}  "
-                      f"area={row['mask_area']}  valid_frac_Δ={row['valid_frac_delta']}  "
-                      f"mode={row['identity_gap_mode']}", flush=True)
+                print(f"  id={vid:<2d} {v['variant'][:28]:28s} faithΔ={row['faith_delta']:<8} "
+                      f"logit={row['faith_logit']:<8} area={row['mask_area']:<8} "
+                      f"valid_Δ={row['valid_frac_delta']:<6} mode={row['identity_gap_mode']}",
+                      flush=True)
             except Exception as exc:
-                row.update({"status": "FAILED", "error": f"{type(exc).__name__}: {exc}", "n": 0})
-                row["_fd_samples"] = []
-                print(f"  FAILED: {row['error']}", flush=True)
-
+                row.update({"status": "FAILED", "error": f"{type(exc).__name__}: {exc}",
+                            "n": 0, "_fd_samples": []})
+                print(f"  id={vid} FAILED: {row['error']}", flush=True)
             ds_rows.append(row)
-            write_csv(csv_path, [{k: x for k, x in r.items() if not k.startswith("_")}
-                                 for r in rows + ds_rows])
+
+        write_csv(csv_path, [{k: x for k, x in r.items() if not k.startswith("_")}
+                             for r in rows + ds_rows])
 
         # ---- anchor every row of this dataset to its own random control ----
         rnd = next((r for r in ds_rows if r["ID"] == 0 and r["status"] == "ok"), None)

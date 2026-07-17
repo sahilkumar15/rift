@@ -392,6 +392,62 @@ class CIFTAdapter:
 # and add gradient-safe paths used only by explainers.
 # =============================================================================
 
+
+
+# =============================================================================
+# RIFT FIX: torch.enable_grad() CANNOT override an @torch.no_grad() DECORATOR
+# =============================================================================
+# _rift_forward_grad() wrapped its CIFT call in `with torch.enable_grad():` and
+# assumed that was enough. It is not.
+#
+# LDM decorates the input path with @torch.no_grad():
+#     DiffusionFakeMixed.get_input        (cldm/diffusionfake.py)
+#       -> LatentDiffusion.get_input      (ldm/models/diffusion/ddpm.py)
+#         -> encode_first_stage           (also decorated)
+#
+# A decorator enters no_grad WHEN THE FUNCTION IS CALLED, i.e. INSIDE our
+# enable_grad() block. Contexts nest and the innermost wins, so no_grad wins.
+# Result: every gradient-based explainer (GradCAM, CIFT-gap) silently received a
+# graph-less tensor, and torch.autograd.grad() then raised. Rows 1-4 of Table 1
+# were all dead for this one reason.
+#
+# torch's decorate_context uses functools.wraps, so the ORIGINAL undecorated
+# function survives at __wrapped__. Swap it in for the duration of the gradient
+# call and restore afterwards.
+#
+# This mutates CLASS attributes, so restoration in `finally` is mandatory: a
+# leaked unwrap would silently disable no_grad for ordinary evaluation and blow
+# up memory on every subsequent forward.
+# =============================================================================
+import contextlib as _rift_contextlib
+
+
+@_rift_contextlib.contextmanager
+def _rift_enable_cift_grad(model):
+    """Temporarily strip @torch.no_grad() from LDM's input/encode path."""
+    targets = ("get_input", "encode_first_stage")
+    patched = []
+    try:
+        for cls in type(model).__mro__:
+            for name in targets:
+                fn = cls.__dict__.get(name)
+                if fn is not None and hasattr(fn, "__wrapped__"):
+                    patched.append((cls, name, fn))
+                    setattr(cls, name, fn.__wrapped__)
+        if not patched:
+            warnings.warn(
+                "RIFT: found no @torch.no_grad()-decorated get_input/"
+                "encode_first_stage to unwrap. Either the CIFT version changed "
+                "or gradients already flow. If gradient explainers still fail, "
+                "this is why.",
+                RuntimeWarning,
+            )
+        yield len(patched)
+    finally:
+        for cls, name, fn in patched:
+            setattr(cls, name, fn)
+
+
 def _rift_forward_grad(self, x, donor=None, forgery_type="swap"):
     """
     Gradient-enabled CIFT forward.
@@ -418,7 +474,10 @@ def _rift_forward_grad(self, x, donor=None, forgery_type="swap"):
 
     batch = self._build_batch(x, donor=donor, forgery_type=forgery_type)
 
-    with torch.enable_grad():
+    # _rift_enable_cift_grad() is REQUIRED here: enable_grad() alone is a no-op
+    # against LDM's @torch.no_grad()-decorated get_input(). See the comment block
+    # above _rift_enable_cift_grad for the full explanation.
+    with torch.enable_grad(), _rift_enable_cift_grad(self.model):
         source, target, c, _ = self.model.get_input(batch, self.model.first_stage_key)
         out = self.model(source, target, c, batch[self.keys["label_key"]])
 
