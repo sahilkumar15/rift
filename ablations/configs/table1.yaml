@@ -1,0 +1,168 @@
+# =============================================================================
+# TABLE 1 - component ablation x dataset generalization
+#
+# One knob controls the entire experiment's fairness: eval.cells.
+# EVERY row gets exactly that many 8x8 grid cells, so mask_area is identical
+# across rows by construction and rift_score cannot be won on budget.
+#
+# To add a dataset: add a block under `datasets:`. Nothing else changes.
+# To add a method:  add a block under `variants:`. Nothing else changes.
+# =============================================================================
+base_config: configs/rift_general.yaml
+output_dir: experiments/ablations/table1
+
+# Where trained policy checkpoints live: <root_dir>/<run_name>/ckpt/latest.pth
+root_dir: experiments/ablations/table2
+
+cift:
+  root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+  ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
+  backbone: convnextv2_base
+  config: configs/diffusionfake_mixed.yaml
+
+policy_defaults:
+  grid: 8
+  hidden: 256
+  feat_dim: 1024
+
+policies:
+  logit_h4:
+    run_name: T1_RIFT_logit_only_H4
+    reward_preset: generic_logit      # Gate 2 control arm
+    horizon: 4
+    ckpt: auto
+  full_h4:
+    run_name: T1_RIFT_full_H4
+    reward_preset: full_rift          # Gate 2 treatment arm
+    horizon: 4
+    ckpt: auto
+
+# -----------------------------------------------------------------------------
+# DATASETS
+#   role: in_domain | control | zero_shot
+#   donor_type: ground_truth (frame-aligned source) | retrieved (same-id ref)
+#   train_csv is optional; only in_domain needs it.
+#
+#   `ffpp_c23_retrieved` is NOT filler. It is the control that kills the
+#   reviewer question "is your OOD drop generalization failure or just worse
+#   donors?". Same images as ffpp_c23, retrieved donors instead of GT donors.
+#   If it matches ffpp_c23, donor quality is not the confound.
+# -----------------------------------------------------------------------------
+datasets:
+  ffpp_c23:
+    display: "FF++ c23"
+    role: in_domain
+    donor_type: ground_truth
+    train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
+    eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
+
+  ffpp_c23_retrieved:
+    display: "FF++ c23 (retrieved donor)"
+    role: control
+    donor_type: retrieved
+    eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_retrieved.csv
+
+  celebdf_v2:
+    display: "CelebDF-v2"
+    role: zero_shot
+    donor_type: retrieved
+    eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_celebdf_v2_test.csv
+
+  diffswap:
+    display: "DiffSwap"
+    role: zero_shot
+    donor_type: retrieved
+    eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_diffswap_test.csv
+
+eval:
+  cells: 4                  # mask budget for EVERY row -> area = 4/64 = 0.0625
+  grid: 8
+  intervention_mode: blur   # sweep blur|mean|zero via --intervention-mode
+  candidate_pool: 16
+  reward_preset: full_rift  # scoring preset; identical for all rows
+
+  # MANDATORY once a second dataset exists. Faithfulness of a "why fake"
+  # explanation is undefined when the detector has no fake evidence. Ungated,
+  # OOD samples with e0~0 contribute structural zeros and you report
+  # "faithfulness collapses OOD" when you measured "CIFT saw nothing".
+  # valid_frac_* reports how many samples actually contributed.
+  min_evidence: 0.05
+
+  max_items: full           # int | full
+  batch_size: 8
+  forward_batch_size: 64
+  seeds: [3407, 1234, 2024] # only stochastic rows are re-run; policies are argmax
+  bootstrap: 2000
+  strict_gradcam: true      # never let the logit baseline become a Delta row
+
+# -----------------------------------------------------------------------------
+# VARIANTS - the component factorial.
+#   delta_g : grounded in CIFT's donor identity gap
+#   ns      : uses necessity/sufficiency interventions to select
+#   rp      : uses the RL policy (learned sequential search)
+# Reading rows 0->5, exactly one capability is added at a time, so each row
+# isolates one claim. Row 4 vs 5 is Gate 2 and carries the paper's novelty.
+# -----------------------------------------------------------------------------
+variants:
+  - id: 0
+    variant: "Random cells"
+    kind: random_cell
+    mask_source: "random 4/64 cells"
+    delta_g: false
+    ns: false
+    rp: false
+    stochastic: true        # re-run across eval.seeds
+  - id: 1
+    variant: "Grad-CAM (logit)"
+    kind: gradcam
+    mask_source: "logit saliency -> top-4 cells"
+    delta_g: false
+    ns: false
+    rp: false
+    stochastic: false
+  - id: 2
+    variant: "CIFT-Δ saliency"
+    kind: cift_delta
+    mask_source: "Δ saliency -> top-4 cells"
+    delta_g: true
+    ns: false
+    rp: false
+    stochastic: false
+  - id: 3
+    variant: "Grad-CAM + causal select"
+    kind: causal_select
+    base: gradcam
+    channel: logit
+    mask_source: "logit + N/S greedy"
+    delta_g: false
+    ns: true
+    rp: false
+    stochastic: false
+  - id: 4
+    variant: "CIFT-Δ + causal select"
+    kind: causal_select
+    base: cift_delta
+    channel: delta
+    mask_source: "Δ + N/S greedy"
+    delta_g: true
+    ns: true
+    rp: false
+    stochastic: false
+  - id: 5
+    variant: "RIFT logit-only (RL)"
+    kind: policy
+    policy: logit_h4
+    mask_source: "RL ← logit evidence"
+    delta_g: false
+    ns: true
+    rp: true
+    stochastic: false
+  - id: 6
+    variant: "RIFT full (RL + Δ)"
+    kind: policy
+    policy: full_h4
+    mask_source: "RL ← Δ evidence"
+    delta_g: true
+    ns: true
+    rp: true
+    stochastic: false

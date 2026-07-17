@@ -1,13 +1,26 @@
 # Path: src/explainers/gradcam_explainer.py
-"""
-Robust logit-gradient saliency explainer.
+# Status: REWRITTEN - the silent Delta fallback is now opt-in and reported.
+"""Logit-gradient saliency explainer.
 
-Original Grad-CAM failed with CIFT because the deployed CIFT adapter uses
-torch.no_grad() for normal inference. This version uses the gradient-enabled
-adapter method predict_logits_for_grad() when available.
+CORRECTNESS NOTE (this is why the file was rewritten)
+-----------------------------------------------------
+This explainer is the LOGIT-CHANNEL baseline. Its entire job in Table 1 is to
+answer: "what does a standard gradient method, grounded in the deployed logit
+and knowing nothing about Delta, cite?"
 
-If CIFT still blocks gradients internally, it falls back to adapter.explain_identity_gap().
+The previous version wrapped everything in `except Exception:` and fell back to
+adapter.explain_identity_gap(), i.e. a DELTA-GROUNDED map. That fallback is
+reachable in normal operation, because the deployed CIFT adapter runs inference
+under torch.no_grad(). When it fired, the "Grad-CAM logit" row silently became a
+Delta row, the paper's `Delta-grounding: no` tick became false, and nothing in
+the CSV recorded it.
+
+Default is now strict=True: if the logit gradient cannot be obtained, RAISE.
+A failed row is recoverable. A silently mislabelled row is a retracted paper.
 """
+from __future__ import annotations
+
+import warnings
 
 from .base_explainer import BaseExplainer
 
@@ -15,8 +28,11 @@ from .base_explainer import BaseExplainer
 class GradCAMExplainer(BaseExplainer):
     name = "gradcam_logit"
 
-    def __init__(self, target_class=1):
-        self.target_class = target_class
+    def __init__(self, target_class: int = 1, *, strict: bool = True):
+        self.target_class = int(target_class)
+        self.strict = bool(strict)
+        # Inspect after a run; surfaced as a CSV column by run_table1.
+        self.used_delta_fallback = False
 
     def explain(self, image, adapter, **kw):
         import torch
@@ -30,29 +46,44 @@ class GradCAMExplainer(BaseExplainer):
             else:
                 logits = adapter.predict_logits(x)
 
-            if logits.dim() > 1:
-                score = logits[:, self.target_class].sum()
-            else:
-                score = logits.sum()
+            score = (
+                logits[:, self.target_class].sum()
+                if logits.dim() > 1
+                else logits.sum()
+            )
 
             if not getattr(score, "requires_grad", False):
-                raise RuntimeError("logit score does not require grad")
+                raise RuntimeError(
+                    "CIFT logit score does not require grad. The adapter is "
+                    "running under no_grad; expose predict_logits_for_grad()."
+                )
 
             grad = torch.autograd.grad(
-                score,
-                x,
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=True,
+                score, x, retain_graph=False, create_graph=False, allow_unused=True
             )[0]
 
             if grad is None:
-                raise RuntimeError("input gradient is None")
+                raise RuntimeError("Input gradient is None (graph detached).")
 
             cam = grad.abs().mean(dim=1, keepdim=True)
 
-        except Exception:
-            # Fallback keeps audit runnable and still gives a deterministic model-related map.
+        except Exception as exc:
+            if self.strict:
+                raise RuntimeError(
+                    "GradCAMExplainer failed to obtain a LOGIT gradient: "
+                    f"{type(exc).__name__}: {exc}\n"
+                    "Refusing to fall back to the identity-gap map: that would "
+                    "silently turn the logit-channel baseline into a "
+                    "Delta-grounded row and invalidate Table 1. Pass "
+                    "strict=False only if you will report the fallback."
+                ) from exc
+
+            warnings.warn(
+                "GradCAMExplainer fell back to the DELTA map. This row is NOT a "
+                "logit-channel baseline and must not be reported as one.",
+                RuntimeWarning,
+            )
+            self.used_delta_fallback = True
             cam = adapter.explain_identity_gap(
                 image,
                 donor=kw.get("donor"),
@@ -61,13 +92,8 @@ class GradCAMExplainer(BaseExplainer):
             )
 
         cam = F.interpolate(
-            cam,
-            size=image.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
+            cam, size=image.shape[-2:], mode="bilinear", align_corners=False
         )
-
         cam = cam - cam.amin(dim=(2, 3), keepdim=True)
         cam = cam / (cam.amax(dim=(2, 3), keepdim=True) + 1e-8)
-
         return cam.detach()
