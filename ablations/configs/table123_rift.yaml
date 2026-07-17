@@ -1,5 +1,4 @@
 base_config: configs/rift_general.yaml
-# root_dir: experiments/ablations/rift_table123
 root_dir: experiments/ablations/table2
 cift:
   root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
@@ -33,6 +32,7 @@ eval:
   intervention_mode: blur
   topk_frac: 0.12
   output_dir: experiments/ablations/rift_table123/final_tables
+  min_evidence: 0.0
 policy_defaults:
   grid: 8
   hidden: 256
@@ -136,12 +136,13 @@ tables:
     filename: table1_component_ablation.csv
     rows:
     - id: 0
-      variant: Random mask
-      kind: random
-      mask_source: random
+      variant: Random cells (area-matched, H=4)
+      kind: random_cell
+      mask_source: random 4/64 cells
       delta_g: false
       ns: false
       rp: false
+      cells: 4
     - id: 1
       variant: Grad-CAM logit
       kind: gradcam
@@ -252,6 +253,36 @@ tables:
       policy: full_h12
       mask_source: RL policy
       horizon: H=12
+    - id: 7
+      variant: Random cells (area-matched, 1/64)
+      kind: random_cell
+      cells: 1
+      mask_source: random cells
+      horizon: — (1 cells)
+    - id: 8
+      variant: Random cells (area-matched, 4/64)
+      kind: random_cell
+      cells: 4
+      mask_source: random cells
+      horizon: — (4 cells)
+    - id: 9
+      variant: Random cells (area-matched, 8/64)
+      kind: random_cell
+      cells: 8
+      mask_source: random cells
+      horizon: — (8 cells)
+    - id: 10
+      variant: Random cells (area-matched, 10/64)
+      kind: random_cell
+      cells: 10
+      mask_source: random cells
+      horizon: — (10 cells)
+    - id: 11
+      variant: Random cells (area-matched, 12/64)
+      kind: random_cell
+      cells: 12
+      mask_source: random cells
+      horizon: — (12 cells)
   table2_objective_variable:
     filename: table2_objective_variable_ablation.csv
     rows:

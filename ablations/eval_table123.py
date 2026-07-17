@@ -230,6 +230,7 @@ def row_prefix(row: Dict[str, Any]) -> Dict[str, Any]:
 def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
     from src.explainers.cift_gap_explainer import CIFTGapExplainer
     from src.explainers.gradcam_explainer import GradCAMExplainer
+    from src.explainers.random_cell_explainer import RandomCellExplainer
     from src.explainers.random_explainer import RandomExplainer
 
     kind = row["kind"]
@@ -237,7 +238,21 @@ def make_explainer(row: Dict[str, Any], manifest: Dict[str, Any], device: str):
     defaults = manifest["policy_defaults"]
     forward_batch_size = int(eval_cfg.get("forward_batch_size", 32))
 
+    if kind == "random_cell":
+        # Area- AND geometry-matched control. cells must equal the horizon
+        # of the policy this row is a control for.
+        return RandomCellExplainer(
+            cells=int(row.get("cells", 4)),
+            grid=int(defaults.get("grid", 8)),
+            seed=int(eval_cfg.get("seed", 3407)) + int(row.get("id", 0) or 0)
+            if str(row.get("id", "")).isdigit()
+            else int(eval_cfg.get("seed", 3407)),
+        )
+
     if kind == "random":
+        # LEGACY: scattered-pixel mask. NOT geometry-matched to a grid
+        # policy; under blur it is a near-identity intervention. Kept only
+        # for backward compatibility. Use kind: random_cell.
         return RandomExplainer()
 
     if kind == "gradcam":
