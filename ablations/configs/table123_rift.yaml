@@ -241,18 +241,6 @@ tables:
       policy: full_h8
       mask_source: RL policy
       horizon: H=8
-    - id: 5
-      variant: RL policy H=10
-      kind: policy
-      policy: full_h10
-      mask_source: RL policy
-      horizon: H=10
-    - id: 6
-      variant: RL policy H=12
-      kind: policy
-      policy: full_h12
-      mask_source: RL policy
-      horizon: H=12
     - id: 7
       variant: Random cells (area-matched, 1/64)
       kind: random_cell
@@ -283,6 +271,18 @@ tables:
       cells: 12
       mask_source: random cells
       horizon: — (12 cells)
+    - id: 12
+      variant: RL policy H=10
+      kind: policy
+      policy: full_h10
+      mask_source: RL policy
+      horizon: H=10
+    - id: 13
+      variant: RL policy H=12
+      kind: policy
+      policy: full_h12
+      mask_source: RL policy
+      horizon: H=12
   table2_objective_variable:
     filename: table2_objective_variable_ablation.csv
     rows:

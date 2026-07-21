@@ -498,6 +498,16 @@ def _rift_forward_grad(self, x, donor=None, forgery_type="swap"):
     gap = getattr(self.model.control_model, "_gap", None)
 
     if gap is None:
+        # Substituting zeros here is what let explain_identity_gap fall through to
+        # the image-energy fallback with no warning: zeros.sum() has
+        # requires_grad=False, so the "is the gap differentiable?" check failed
+        # silently. When a donor WAS supplied, a missing _gap is a real error.
+        if donor is not None:
+            raise RuntimeError(
+                "CIFT control_model._gap is absent after a donor-grounded forward. "
+                "The dual identity branch did not run or did not expose _gap, so no "
+                "TRUE Delta is available for this batch."
+            )
         gap = torch.zeros_like(logits)
 
     gap = gap.float().view(-1)
@@ -511,73 +521,135 @@ def _rift_predict_logits_for_grad(self, x):
     return logits
 
 
-def _rift_explain_identity_gap(self, x, donor=None, source_id=None, target_id=None):
-    """
-    Gradient attribution for CIFT identity-gap.
+def _rift_explain_identity_gap(self, x, donor=None, source_id=None, target_id=None,
+                               strict=None):
+    """Delta-grounded input attribution: |d(delta)/dx| pooled over channels.
 
-    Priority:
-      1. donor-grounded true gap gradient if donor is provided
-      2. deployed logit input-gradient fallback
-      3. deterministic image-energy fallback, so audit never crashes
+    WHY THIS WAS REWRITTEN (_rift_explain_identity_gap_strict)
+    ----------------------------------------------------------
+    The previous version had a three-tier silent fallback:
+        1. donor-grounded gap gradient
+        2. deployed logit gradient        (NOT Delta-grounded)
+        3. normalized image energy        (x.abs().mean() -- literally brightness)
+
+    Tiers 1 and 2 only *returned* when `score.requires_grad` was True. When it was
+    False there was NO exception, so the try/except never fired and NO warning was
+    emitted -- execution simply fell through to tier 3 and returned image
+    brightness. That map would then be reported in Table 1 under a "Delta-grounded:
+    yes" tick, which is false.
+
+    This is not hypothetical: tier 2 is known-broken on this checkpoint, because
+    CIFT's logits are read out of LDM's `loss_dict`, whose entries are detached by
+    convention. GradCAMExplainer raising "CIFT logit score does not require grad"
+    is the same root cause.
+
+    A wrong number that looks plausible is worse than a failed row: the failed row
+    gets fixed, the wrong number gets published. So: raise, with a precise
+    diagnosis of which tier failed and why.
+
+    Escape hatch: strict=False, or RIFT_ALLOW_SALIENCY_FALLBACK=1. If you use it,
+    self.last_saliency_source records what actually ran, and run_table1 surfaces it
+    as a CSV column so the row cannot be reported as Delta-grounded by accident.
     """
+    import os
+
     if not _HAS_TORCH:
         raise RuntimeError("explain_identity_gap needs torch.")
 
-    x = x.clone().detach().to(self.device).float().requires_grad_(True)
+    if strict is None:
+        strict = os.environ.get("RIFT_ALLOW_SALIENCY_FALLBACK", "0") != "1"
 
+    x = x.clone().detach().to(self.device).float().requires_grad_(True)
     if donor is not None:
         donor = donor.to(self.device).float()
 
-    # 1) True donor-grounded identity-gap gradient.
-    if donor is not None:
+    why = []
+
+    # ---- tier 1: donor-grounded TRUE gap gradient (the only Delta-valid path)
+    if donor is None:
+        why.append("no donor supplied -> true-gap gradient not attempted "
+                   "(Delta is a DONOR identity gap; without a donor there is no Delta)")
+    else:
         try:
             _, gap = self._forward_grad(x, donor=donor)
             score = gap.sum()
-
-            if getattr(score, "requires_grad", False):
+            if not getattr(score, "requires_grad", False):
+                why.append(
+                    "gap tensor has requires_grad=False -- control_model._gap is "
+                    "either detached inside CIFT, or absent so _forward_grad "
+                    "substituted torch.zeros_like(logits)"
+                )
+            else:
                 grad = torch.autograd.grad(
-                    score,
-                    x,
-                    retain_graph=False,
-                    create_graph=False,
-                    allow_unused=True,
+                    score, x, retain_graph=False, create_graph=False, allow_unused=True
                 )[0]
-
-                if grad is not None:
+                if grad is None:
+                    why.append("autograd.grad returned None for the gap path -- "
+                               "the graph does not reach the input tensor")
+                else:
+                    self.last_saliency_source = "true_gap_gradient"
                     return grad.abs().mean(dim=1, keepdim=True).detach()
         except Exception as e:
-            warnings.warn(
-                f"CIFT true-gap gradient failed; falling back to logit gradient. Error: {e}",
-                RuntimeWarning,
-            )
+            why.append(f"gap path raised {type(e).__name__}: {e}")
 
-    # 2) Deployed logit gradient fallback.
+    # ---- tier 2: deployed logit gradient. NOT Delta-grounded. -------------
     try:
         logits = self._forward_grad(x, donor=None)[0]
         score = logits.sum()
-
-        if getattr(score, "requires_grad", False):
+        if not getattr(score, "requires_grad", False):
+            why.append(
+                "logit tensor has requires_grad=False -- CIFT logits are read from "
+                "LDM's loss_dict['v/logits'], and loss_dict entries are detached by "
+                "convention. Hook the classifier module instead of reading loss_dict."
+            )
+        else:
             grad = torch.autograd.grad(
-                score,
-                x,
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=True,
+                score, x, retain_graph=False, create_graph=False, allow_unused=True
             )[0]
-
             if grad is not None:
+                if strict:
+                    raise RuntimeError(
+                        "explain_identity_gap fell through to the LOGIT gradient.\n"
+                        + "\n".join(f"  - {w}" for w in why)
+                        + "\n\nThat map is grounded in the deployed logit, NOT in the "
+                          "donor identity gap. Returning it under a 'Delta-grounded' "
+                          "tick would make Table 1's Delta column false, and would "
+                          "collapse the row-4-vs-row-3 contrast the paper depends on."
+                    )
+                warnings.warn("explain_identity_gap using LOGIT gradient, not Delta.",
+                              RuntimeWarning)
+                self.last_saliency_source = "logit_gradient_fallback"
                 return grad.abs().mean(dim=1, keepdim=True).detach()
+            why.append("autograd.grad returned None for the logit path")
+    except RuntimeError:
+        raise
     except Exception as e:
-        warnings.warn(
-            f"CIFT logit gradient failed; falling back to image-energy saliency. Error: {e}",
-            RuntimeWarning,
+        why.append(f"logit path raised {type(e).__name__}: {e}")
+
+    # ---- tier 3: image energy. This is brightness, not attribution. -------
+    if strict:
+        raise RuntimeError(
+            "explain_identity_gap could not produce a Delta-grounded map.\n"
+            + "\n".join(f"  - {w}" for w in why)
+            + "\n\nRefusing to return the image-energy fallback: it is "
+              "x.abs().mean() -- the average brightness of the input -- and has "
+              "nothing to do with CIFT's identity gap. Reporting it under a "
+              "'Delta-grounded' tick would be a fabricated result.\n"
+              "To inspect it anyway: RIFT_ALLOW_SALIENCY_FALLBACK=1 (the row is then "
+              "tagged saliency_source=image_energy_fallback and MUST NOT be reported "
+              "as Delta-grounded)."
         )
 
-    # 3) Last-resort deterministic fallback, normalized image energy.
+    warnings.warn("explain_identity_gap returning IMAGE-ENERGY fallback. This is NOT "
+                  "a Delta map and must not be reported as one.", RuntimeWarning)
+    self.last_saliency_source = "image_energy_fallback"
     sal = x.detach().abs().mean(dim=1, keepdim=True)
     sal = sal - sal.amin(dim=(2, 3), keepdim=True)
     sal = sal / (sal.amax(dim=(2, 3), keepdim=True) + 1e-8)
     return sal
+
+
+_rift_explain_identity_gap_strict = _rift_explain_identity_gap
 
 
 # Attach patched methods to CIFTAdapter.

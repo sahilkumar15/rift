@@ -469,6 +469,13 @@ def main() -> int:
                 for k in keys:
                     if getattr(explainers[k], "used_delta_fallback", False):
                         row["gradcam_delta_fallback"] = True
+                # Record what the adapter ACTUALLY computed. If a Delta row ran on
+                # a logit or image-energy fallback, this column is the only thing
+                # standing between that and a false tick in the paper.
+                srcs = {getattr(adapter, "last_saliency_source", "") for k in keys}
+                srcs.discard("")
+                if srcs:
+                    row["saliency_source"] = ",".join(sorted(srcs))
                 agg = aggregate([swept[k] for k in keys], t1)
                 row["_fd_samples"] = agg.pop("_fd_samples")
                 area = agg["mask_area"]

@@ -1,0 +1,120 @@
+base_config: configs/rift_general.yaml
+root_dir: experiments/ablations/rift_table123/table_2_ns
+cift:
+  root: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake
+  ckpt: /scratch/sahil/projects/img_deepfake/code/ImageDifussionFake/experiments/Mix5_AllDomains_v5/ckpt/best-eer-epoch=34.ckpt
+  backbone: convnextv2_base
+  config: configs/diffusionfake_mixed.yaml
+data:
+  train_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_train_c23_full.csv
+  val_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
+  eval_csv: /scratch/sahil/projects/img_deepfake/code/rift/data/slices/rift_ffpp_val_c23_full.csv
+train:
+  gpus: 4,5,6,7
+  batch_size: 256
+  epochs: 30
+  workers: 4
+  val_every: 1
+  val_max_batches: 8
+  resume: auto
+  wandb_mode: online
+  max_items: null
+  val_max_items: null
+wandb:
+  enabled: true
+  project: RIFT_ICLR27
+  group: table_2_ns_variable_h10
+eval:
+  gpu: '4'
+  seed: 3407
+  max_items: 512
+  candidate_pool: 16
+  intervention_mode: blur
+  topk_frac: 0.12
+  output_dir: experiments/ablations/rift_table123/table_2_ns/final_tables
+  min_evidence: 0.0
+policy_defaults:
+  grid: 8
+  hidden: 256
+  feat_dim: 1024
+policies:
+  necessity_var_h10:
+    run_name: T2_NS_necessity_only_H10
+    reward_preset: necessity_only
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  sufficiency_var_h10:
+    run_name: T2_NS_sufficiency_only_H10
+    reward_preset: sufficiency_only
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  nosparsity_var_h10:
+    run_name: T2_NS_no_sparsity_H10
+    reward_preset: no_sparsity
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+  full_var_h10:
+    run_name: T2_NS_full_RIFT_H10
+    reward_preset: full_rift
+    horizon: 10
+    ckpt: auto
+    allow_stop: true
+    min_cells: 2
+    max_cells: 10
+    force_min_cells: true
+    forbid_revisit: true
+    state_blind: false
+    sparsity_mode: linear
+tables:
+  table2_objective_variable:
+    filename: table2_objective_variable_ablation.csv
+    rows:
+    - id: 1
+      variant: Necessity-only
+      kind: policy
+      policy: necessity_var_h10
+      necessity: true
+      sufficiency: false
+      sparsity: true
+    - id: 2
+      variant: Sufficiency-only
+      kind: policy
+      policy: sufficiency_var_h10
+      necessity: false
+      sufficiency: true
+      sparsity: true
+    - id: 3
+      variant: N+S, no sparsity
+      kind: policy
+      policy: nosparsity_var_h10
+      necessity: true
+      sufficiency: true
+      sparsity: false
+    - id: 4
+      variant: RIFT full
+      kind: policy
+      policy: full_var_h10
+      necessity: true
+      sufficiency: true
+      sparsity: true
